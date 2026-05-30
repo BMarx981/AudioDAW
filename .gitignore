@@ -1,0 +1,52 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+**/ios/Flutter/.last_build_id
+**/ios/Pods/
+**/macos/Pods/
+**/ios/.symlinks/
+**/macos/Flutter/ephemeral/
+**/windows/flutter/ephemeral/
+**/linux/flutter/ephemeral/
+.fvm/
+
+# Bridge generated artifacts that should NOT be checked in
+# (generated bridge code itself IS checked in; only intermediate artifacts here)
+**/*.freezed.dart
+**/*.g.dart
+
+# IDE
+.idea/
+*.iml
+.vscode/*.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local development
+.env
+.env.local
+*.log
+
+# Test artifacts
+**/coverage/
+**/test_results/
+
+# Plugin scan caches (regeneratable)
+.plugin-cache/
+
+# Audio scratch files
+*.wav.tmp
+scratch/

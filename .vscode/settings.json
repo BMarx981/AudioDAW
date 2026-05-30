@@ -1,0 +1,64 @@
+{
+  "editor.formatOnSave": true,
+  "editor.rulers": [100],
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true,
+    "editor.tabSize": 4
+  },
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.features": "all",
+  "rust-analyzer.checkOnSave": true,
+
+  "[dart]": {
+    "editor.defaultFormatter": "Dart-Code.dart-code",
+    "editor.formatOnSave": true,
+    "editor.tabSize": 2,
+    "editor.rulers": [80]
+  },
+  "dart.lineLength": 80,
+  "dart.previewFlutterUiGuides": true,
+  "dart.previewFlutterUiGuidesCustomTracking": true,
+
+  "[markdown]": {
+    "editor.defaultFormatter": "yzhang.markdown-all-in-one",
+    "editor.wordWrap": "on",
+    "editor.quickSuggestions": {
+      "comments": "off",
+      "strings": "off",
+      "other": "off"
+    }
+  },
+
+  "search.exclude": {
+    "**/target": true,
+    "**/build": true,
+    "**/.dart_tool": true,
+    "**/Pods": true,
+    "**/*.lock": false
+  },
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/build/**": true,
+    "**/.dart_tool/**": true
+  },
+
+  "cSpell.words": [
+    "biquad",
+    "cpal",
+    "DAW",
+    "DSP",
+    "flutter",
+    "polyblep",
+    "realtime",
+    "ringbuf",
+    "rtrb",
+    "symphonia",
+    "vst3",
+    "wasapi"
+  ]
+}

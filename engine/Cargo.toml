@@ -1,0 +1,23 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.12.0"
+# Cross-platform audio I/O (CoreAudio / WASAPI / ALSA).
+cpal = "0.15"
+# Lock-free single-producer/single-consumer ring buffer for control -> audio
+# messaging. Wait-free push/pop, no allocation — safe on the audio thread.
+rtrb = "0.3"
+
+[dev-dependencies]
+# Dev-only guard that aborts if the audio path allocates. See the cfg(test)
+# global allocator in lib.rs and the realtime-safety tests in osc.rs.
+assert_no_alloc = "1.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
