@@ -3,28 +3,70 @@ import 'dart:typed_data';
 /// The seam between the UI and the audio engine.
 ///
 /// Per TESTING.md the UI never talks to the Rust bridge directly — it depends on
-/// this interface. Production wires in [RustEngine] (bridge-backed); widget tests
-/// wire in a `FakeEngine` that records calls. Swapping implementations is also how
-/// we'll later drop in an offline-render engine for export.
+/// this interface and on the plain value types below ([ClipInfo],
+/// [PlaybackState]), never on generated bridge classes. Production wires in
+/// [RustEngine]; widget tests wire in a `FakeEngine` that returns scripted data.
 abstract class EngineInterface {
-  /// Open the audio device and start the sine tone. Throws if no device is
-  /// available.
-  Future<void> start();
+  /// Decode a WAV at [path], hand it to the engine (starting the audio device if
+  /// needed), and return its metadata + waveform summary. The clip loads stopped
+  /// at the start — call [play] to hear it. Throws if the file can't be decoded.
+  Future<ClipInfo> loadWav(String path);
 
-  /// Stop playback and release the device.
-  Future<void> stop();
+  /// Begin or resume playback. Fire-and-forget; no-op if nothing is loaded.
+  void play();
 
-  /// Set the oscillator frequency. Fire-and-forget: safe to call on every slider
-  /// tick. No-op if the engine isn't running.
-  void setFrequency(double hz);
+  /// Pause, holding the current position. Fire-and-forget.
+  void pause();
 
-  /// Whether the engine is currently playing.
+  /// Stop and rewind to the start. Fire-and-forget.
+  void stop();
+
+  /// Seek to [secs] from the clip start. Fire-and-forget; safe on every scrub
+  /// tick (the engine clamps to the clip bounds).
+  void seek(double secs);
+
+  /// Whether the audio engine is running (device open).
   bool get isRunning;
 
-  /// A stream of oscilloscope frames. Each event is one trigger-aligned window
-  /// of mono samples in [-1, 1] to plot. Emits an empty frame while stopped.
-  ///
-  /// Subscribe once and cache it — the production implementation spawns a pump
-  /// per subscription, so don't read this getter on every build.
+  /// A stream of oscilloscope frames — one trigger-aligned window of mono samples
+  /// in [-1, 1] per event, the live output of the player. Subscribe once and
+  /// cache it; the production implementation spawns a pump per subscription.
   Stream<Float32List> get scopeFrames;
+
+  /// A stream of transport snapshots (~30 Hz) for animating the playhead and
+  /// reflecting play/stop. Subscribe once and cache it.
+  Stream<PlaybackState> get playbackState;
+}
+
+/// A decoded clip's metadata plus its precomputed min/max waveform summary.
+///
+/// The waveform is computed once in Rust at load (not per frame); [waveformMin]
+/// and [waveformMax] are the per-column extremes of the mono signal in [-1, 1],
+/// the same length, ready for a [CustomPainter] to draw as vertical bars.
+class ClipInfo {
+  const ClipInfo({
+    required this.sampleRate,
+    required this.channels,
+    required this.frames,
+    required this.durationSecs,
+    required this.waveformMin,
+    required this.waveformMax,
+  });
+
+  final double sampleRate;
+  final int channels;
+  final int frames;
+  final double durationSecs;
+  final Float32List waveformMin;
+  final Float32List waveformMax;
+}
+
+/// A transport snapshot: where the playhead is and whether audio is advancing.
+class PlaybackState {
+  const PlaybackState({required this.positionSecs, required this.playing});
+
+  final double positionSecs;
+  final bool playing;
+
+  static const stopped = PlaybackState(positionSecs: 0, playing: false);
 }

@@ -1,100 +1,199 @@
+import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../engine/engine_interface.dart';
-import 'frequency_mapping.dart';
 import 'oscilloscope.dart';
+import 'waveform_view.dart';
 
-/// The entire Milestone 0 UI: a play/stop button, a frequency slider, and a live
-/// oscilloscope of the generated waveform.
+/// Open a native file dialog and return the chosen WAV's path, or null if the
+/// user cancelled. The default file-picker for [HomePage]; tests inject their own
+/// so they never pop a real dialog.
+Future<String?> pickWavWithDialog() async {
+  const wav = XTypeGroup(label: 'WAV audio', extensions: ['wav']);
+  final file = await openFile(acceptedTypeGroups: const [wav]);
+  return file?.path;
+}
+
+/// The Milestone 1 UI: open a WAV, see its waveform, scrub it, and play it back,
+/// with a live oscilloscope of the output.
 ///
-/// The widget stays dumb — it owns only view state (slider position, playing
-/// flag) and forwards intent to the injected [EngineInterface]. It never
-/// imports the Rust bridge, which is what lets the widget test drive it with a
-/// fake engine.
+/// The widget stays dumb — it owns only view state and forwards intent to the
+/// injected [EngineInterface]. It never imports the Rust bridge, which is what
+/// lets the widget test drive it with a fake engine and a fake file picker.
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, required this.engine});
+  const HomePage({super.key, required this.engine, this.pickWavPath});
 
   final EngineInterface engine;
+
+  /// Returns the path of a WAV to load, or null to cancel. Defaults to a native
+  /// open dialog; tests inject a stub.
+  final Future<String?> Function()? pickWavPath;
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
-  // Start at A4 (440 Hz), placed on the log slider.
-  double _slider = hzToSlider(440.0);
+  ClipInfo? _clip;
+  String? _filename;
+  double _positionSecs = 0;
   bool _playing = false;
-  bool _busy = false; // guards against double taps while start/stop awaits
+  bool _busy = false; // guards the async load against double taps
+
+  late final StreamSubscription<PlaybackState> _statusSub;
 
   // Subscribe to the scope once; the engine spawns a pump per subscription, so
   // we must not read this getter on every build.
   late final Stream<Float32List> _scopeFrames = widget.engine.scopeFrames;
 
-  double get _hz => sliderToHz(_slider);
+  @override
+  void initState() {
+    super.initState();
+    _statusSub = widget.engine.playbackState.listen((s) {
+      if (!mounted) return;
+      setState(() {
+        _positionSecs = s.positionSecs;
+        _playing = s.playing;
+      });
+    });
+  }
 
-  Future<void> _togglePlay() async {
+  @override
+  void dispose() {
+    _statusSub.cancel();
+    super.dispose();
+  }
+
+  double get _duration => _clip?.durationSecs ?? 0;
+  double get _positionFraction =>
+      _duration > 0 ? (_positionSecs / _duration).clamp(0.0, 1.0) : 0.0;
+
+  Future<void> _openWav() async {
     if (_busy) return;
+    final pick = widget.pickWavPath ?? pickWavWithDialog;
+    final path = await pick();
+    if (path == null) return; // cancelled
+
     setState(() => _busy = true);
     try {
-      if (_playing) {
-        await widget.engine.stop();
-      } else {
-        await widget.engine.start();
-        // Push the current slider frequency immediately so playback starts at
-        // what the UI shows, not the engine's default.
-        widget.engine.setFrequency(_hz);
-      }
-      setState(() => _playing = !_playing);
+      final clip = await widget.engine.loadWav(path);
+      setState(() {
+        _clip = clip;
+        _filename = _basename(path);
+        _positionSecs = 0;
+        _playing = false;
+      });
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('Audio engine error: $e')));
+        ).showSnackBar(SnackBar(content: Text('Could not load WAV: $e')));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  void _onSliderChanged(double value) {
-    setState(() => _slider = value);
-    // Fire-and-forget: drive the engine on every tick. The Rust side ramps to
-    // this frequency, so dragging produces a smooth glide, not a click.
-    widget.engine.setFrequency(_hz);
+  void _togglePlay() {
+    if (_clip == null) return;
+    if (_playing) {
+      widget.engine.pause();
+      setState(() => _playing = false);
+    } else {
+      widget.engine.play();
+      setState(() => _playing = true);
+    }
+  }
+
+  void _stop() {
+    if (_clip == null) return;
+    widget.engine.stop();
+    setState(() {
+      _playing = false;
+      _positionSecs = 0;
+    });
+  }
+
+  void _onSeek(double fraction) {
+    if (_clip == null) return;
+    final secs = fraction * _duration;
+    // Optimistic local update so the playhead tracks the gesture immediately;
+    // the status stream confirms it on the next tick.
+    setState(() => _positionSecs = secs);
+    widget.engine.seek(secs);
   }
 
   @override
   Widget build(BuildContext context) {
+    final clip = _clip;
     return Scaffold(
-      appBar: AppBar(title: const Text('Sine + Slider — Milestone 0')),
+      appBar: AppBar(title: const Text('WAV Player — Milestone 1')),
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
+          constraints: const BoxConstraints(maxWidth: 640),
           child: Padding(
             padding: const EdgeInsets.all(24),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                  '${_hz.toStringAsFixed(1)} Hz',
-                  style: Theme.of(context).textTheme.displaySmall,
+                Row(
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _busy ? null : _openWav,
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text('Open WAV…'),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Text(
+                        _filename ?? 'No file loaded',
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 24),
-                Oscilloscope(frames: _scopeFrames),
-                const SizedBox(height: 24),
-                Slider(
-                  value: _slider,
-                  onChanged: _onSliderChanged,
-                  label: '${_hz.toStringAsFixed(0)} Hz',
-                ),
-                const SizedBox(height: 24),
-                FilledButton.icon(
-                  onPressed: _busy ? null : _togglePlay,
-                  icon: Icon(_playing ? Icons.stop : Icons.play_arrow),
-                  label: Text(_playing ? 'Stop' : 'Play'),
-                ),
+                const SizedBox(height: 20),
+                if (clip != null) ...[
+                  WaveformView(
+                    min: clip.waveformMin,
+                    max: clip.waveformMax,
+                    positionFraction: _positionFraction,
+                    onSeek: _onSeek,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${_fmt(_positionSecs)} / ${_fmt(_duration)}'
+                    '   •   ${clip.sampleRate.toStringAsFixed(0)} Hz'
+                    '   •   ${clip.channels == 1 ? 'mono' : '${clip.channels} ch'}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: _togglePlay,
+                        icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
+                        label: Text(_playing ? 'Pause' : 'Play'),
+                      ),
+                      const SizedBox(width: 12),
+                      OutlinedButton.icon(
+                        onPressed: _stop,
+                        icon: const Icon(Icons.stop),
+                        label: const Text('Stop'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                ],
+                Text('Output', style: Theme.of(context).textTheme.labelMedium),
+                const SizedBox(height: 8),
+                Oscilloscope(frames: _scopeFrames, height: 120),
               ],
             ),
           ),
@@ -102,4 +201,19 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+}
+
+/// `mm:ss.t` for a duration in seconds.
+String _fmt(double secs) {
+  if (secs.isNaN || secs < 0) secs = 0;
+  final m = secs ~/ 60;
+  final s = secs - m * 60;
+  return '${m.toString().padLeft(2, '0')}:${s.toStringAsFixed(1).padLeft(4, '0')}';
+}
+
+/// Last path segment of [path], handling both `/` and `\` so we don't pull in
+/// `dart:io` just to show a filename.
+String _basename(String path) {
+  final cut = path.lastIndexOf(RegExp(r'[/\\]'));
+  return cut < 0 ? path : path.substring(cut + 1);
 }

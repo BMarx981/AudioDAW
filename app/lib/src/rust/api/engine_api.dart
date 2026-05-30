@@ -6,44 +6,126 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `lock`
+// These functions are ignored because they are not marked as `pub`: `lock`, `with_engine`
 
-/// Start the audio engine and begin emitting a sine tone. Idempotent: calling it
-/// while already running is a no-op. Returns an error (surfaced as a Dart
-/// exception) if no audio device could be opened.
-Future<void> startEngine() =>
-    RustLib.instance.api.crateApiEngineApiStartEngine();
-
-/// Stop the engine. Idempotent. Dropping the `Engine` tears down the stream and
-/// joins the audio thread (RAII), so there's nothing else to clean up.
-Future<void> stopEngine() => RustLib.instance.api.crateApiEngineApiStopEngine();
-
-/// Set the oscillator frequency in Hz. Fire-and-forget and synchronous: it pushes
-/// one command to the lock-free ring and returns immediately, so it's safe to
-/// call on every slider tick. No-op if the engine isn't running.
+/// Load and decode a WAV from disk, hand it to the audio engine, and return its
+/// metadata + waveform summary. Starts the engine (opens the audio device) if it
+/// isn't already running. The clip is loaded stopped at the start — call
+/// [`play`] to hear it.
 ///
-/// `frb(sync)` makes this a plain synchronous call on the Dart side (returns
-/// `void`, not `Future`) — there's no reason to await a ring-buffer push.
-void setFrequency({required double hz}) =>
-    RustLib.instance.api.crateApiEngineApiSetFrequency(hz: hz);
+/// Async on the Dart side (it does real file I/O and decoding); throws a Dart
+/// exception if the file can't be read or decoded.
+Future<LoadedClip> loadWav({required String path}) =>
+    RustLib.instance.api.crateApiEngineApiLoadWav(path: path);
 
-/// Whether the engine is currently running. Handy for the UI to reflect state.
+/// Begin or resume playback. Fire-and-forget; no-op if no clip is loaded.
+void play() => RustLib.instance.api.crateApiEngineApiPlay();
+
+/// Pause playback, holding the current position. Fire-and-forget.
+void pause() => RustLib.instance.api.crateApiEngineApiPause();
+
+/// Stop playback and rewind to the start. Fire-and-forget.
+void stop() => RustLib.instance.api.crateApiEngineApiStop();
+
+/// Seek to `secs` from the clip start. Fire-and-forget; safe to call on every
+/// scrub tick (the engine clamps to the clip bounds).
+void seek({required double secs}) =>
+    RustLib.instance.api.crateApiEngineApiSeek(secs: secs);
+
+/// Whether the audio engine is running (device open). Handy for the UI.
 bool isRunning() => RustLib.instance.api.crateApiEngineApiIsRunning();
 
-/// Stream of oscilloscope frames for the UI to draw.
-///
-/// Each item is one trigger-aligned window of mono samples (`Float32List` in
-/// Dart). Subscribe once; the returned Dart `Stream` stays live for the app's
+/// Stream of oscilloscope frames for the UI to draw. Each item is one
+/// trigger-aligned window of mono samples (`Float32List` in Dart) — now the live
+/// output of the WAV player. Subscribe once; the stream stays live for the app's
 /// lifetime, emitting an empty frame while stopped and real audio while playing.
 ///
-/// ## How this stays off the audio thread
-///
-/// The audio callback only ever *pushes* samples into a lock-free ring (see
-/// [`crate::scope`]) — wait-free, no allocation. This function spawns an
-/// ordinary background thread (the "pump") that wakes ~60×/sec, briefly locks
-/// the control-side engine, drains the ring into one window, and hands it to
-/// Dart via `sink`. Nothing here runs on, or blocks, the realtime thread.
-///
-/// The pump exits when Dart cancels the subscription (`sink.add` returns `Err`).
+/// The audio callback only ever *pushes* samples into a lock-free ring; this
+/// spawns a background pump that drains it ~60×/sec and hands frames to Dart.
+/// Nothing here runs on, or blocks, the realtime thread.
 Stream<Float32List> scopeStream() =>
     RustLib.instance.api.crateApiEngineApiScopeStream();
+
+/// Stream of [`PlaybackStatus`] snapshots so the UI can animate the playhead and
+/// reflect play/stop without polling. Also the convenient place to reclaim
+/// retired clips: this pump runs on a control thread and locks the engine ~30×/s
+/// anyway, so it drains the retirement ring each tick.
+Stream<PlaybackStatus> playbackStatusStream() =>
+    RustLib.instance.api.crateApiEngineApiPlaybackStatusStream();
+
+/// What `load_wav` hands back to Dart: enough metadata to label the clip, plus a
+/// precomputed min/max waveform summary for the display painter. Computing the
+/// waveform once at load (not per frame) is the whole point — the UI just draws
+/// these arrays. FRB mirrors this to a Dart class with `Float32List` fields.
+class LoadedClip {
+  /// File sample rate, Hz.
+  final double sampleRate;
+
+  /// Channel count (1 = mono, 2 = stereo).
+  final int channels;
+
+  /// Length in frames (samples per channel).
+  final BigInt frames;
+
+  /// Length in seconds.
+  final double durationSecs;
+
+  /// Per-column minimum of the mono-mixed signal, in `[-1, 1]`.
+  final Float32List waveformMin;
+
+  /// Per-column maximum of the mono-mixed signal, in `[-1, 1]`.
+  final Float32List waveformMax;
+
+  const LoadedClip({
+    required this.sampleRate,
+    required this.channels,
+    required this.frames,
+    required this.durationSecs,
+    required this.waveformMin,
+    required this.waveformMax,
+  });
+
+  @override
+  int get hashCode =>
+      sampleRate.hashCode ^
+      channels.hashCode ^
+      frames.hashCode ^
+      durationSecs.hashCode ^
+      waveformMin.hashCode ^
+      waveformMax.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LoadedClip &&
+          runtimeType == other.runtimeType &&
+          sampleRate == other.sampleRate &&
+          channels == other.channels &&
+          frames == other.frames &&
+          durationSecs == other.durationSecs &&
+          waveformMin == other.waveformMin &&
+          waveformMax == other.waveformMax;
+}
+
+/// A snapshot of transport state for the UI to animate the playhead and reflect
+/// play/stop. Streamed ~30×/sec.
+class PlaybackStatus {
+  /// Current playhead position, seconds from the clip start.
+  final double positionSecs;
+
+  /// Whether playback is currently advancing.
+  final bool playing;
+
+  const PlaybackStatus({required this.positionSecs, required this.playing});
+
+  @override
+  int get hashCode => positionSecs.hashCode ^ playing.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PlaybackStatus &&
+          runtimeType == other.runtimeType &&
+          positionSecs == other.positionSecs &&
+          playing == other.playing;
+}

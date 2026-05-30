@@ -1,19 +1,30 @@
-//! DAW audio engine — Milestone 0 (sine + slider starter).
+//! DAW audio engine — Milestone 1 (WAV playback).
 //!
 //! Layout:
 //! - [`api`]      — the flutter_rust_bridge surface (the only thing Flutter sees)
-//! - [`audio`]    — cpal stream + the realtime callback
-//! - [`osc`]      — the sine oscillator
-//! - [`commands`] — the lock-free control->audio ring buffer
+//! - [`audio`]    — cpal stream + the realtime callback + the `Engine` handle
+//! - [`player`]   — the realtime WAV playback source
+//! - [`clip`]     — decoded, immutable audio shared across threads by `Arc`
+//! - [`decode`]   — symphonia WAV decode (control thread only)
+//! - [`commands`] — the lock-free control->audio command ring
 //! - [`scope`]    — the lock-free audio->UI sample tap for the oscilloscope
+//! - [`osc`]      — the Milestone 0 sine oscillator; kept for the synth
+//!   milestone but no longer wired into the audio callback
 
 pub mod api;
 mod frb_generated;
 
 mod audio;
+mod clip;
 mod commands;
-mod osc;
+mod decode;
+mod player;
 mod scope;
+
+// Kept for a future milestone (built-in synth); not currently wired into the
+// audio path, so suppress the dead-code lint on its still-unused parts.
+#[allow(dead_code)]
+mod osc;
 
 // In test builds only, install an allocator that lets `assert_no_alloc` detect
 // heap activity on the audio path. This is gated to `cfg(test)` so production

@@ -20,10 +20,22 @@ use rtrb::{Consumer, Producer, RingBuffer};
 /// Keep these `Copy` and small: they are memcpy'd into the ring buffer. As the
 /// engine grows this becomes the one channel through which *all* parameter
 /// changes flow to the audio thread.
+///
+/// Note the deliberate split: small POD transport commands travel here, but a
+/// freshly-decoded clip (potentially megabytes) does **not** — it rides its own
+/// `Arc<AudioClip>` hand-off ring (see [`crate::audio`] and [`crate::player`]),
+/// so this enum stays tiny and `Copy`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
-    /// Glide the oscillator to this frequency, in Hz.
-    SetFrequency(f32),
+    /// Begin (or resume) playback from the current position.
+    Play,
+    /// Pause playback, holding the current position.
+    Pause,
+    /// Stop playback and rewind to the start.
+    Stop,
+    /// Jump the playhead to this position, in seconds from the clip start.
+    /// Clamped to the clip bounds by the player.
+    Seek(f32),
 }
 
 /// Number of in-flight commands the ring can hold. Far more than the UI can
@@ -50,10 +62,18 @@ mod tests {
         let (mut tx, mut rx) = command_channel();
         const N: usize = 200; // < CAPACITY, so nothing is dropped
 
+        // A distinct command per index so we can assert exact ordering on the far
+        // side; the cycle covers every variant including the payload-carrying one.
+        let make = |i: usize| match i % 4 {
+            0 => Command::Play,
+            1 => Command::Pause,
+            2 => Command::Stop,
+            _ => Command::Seek(i as f32),
+        };
+
         let producer = std::thread::spawn(move || {
             for i in 0..N {
-                // Distinct values so we can assert exact ordering on the far side.
-                while tx.push(Command::SetFrequency(i as f32)).is_err() {
+                while tx.push(make(i)).is_err() {
                     std::thread::yield_now(); // ring momentarily full; spin briefly
                 }
             }
@@ -69,7 +89,7 @@ mod tests {
         }
         producer.join().unwrap();
 
-        let expected: Vec<Command> = (0..N).map(|i| Command::SetFrequency(i as f32)).collect();
+        let expected: Vec<Command> = (0..N).map(make).collect();
         assert_eq!(received, expected, "messages lost or reordered");
     }
 

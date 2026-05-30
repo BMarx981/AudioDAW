@@ -7,47 +7,72 @@ import 'package:daw/engine/engine_interface.dart';
 /// and never touches Rust. This is the seam TESTING.md describes — widget tests
 /// run entirely against this.
 class FakeEngine implements EngineInterface {
-  final List<double> frequencies = [];
-  int startCount = 0;
+  final List<String> loadedPaths = [];
+  int playCount = 0;
+  int pauseCount = 0;
   int stopCount = 0;
+  final List<double> seeks = [];
   bool _running = false;
 
-  /// If set, [start] throws this — used to test the error path.
-  Object? startError;
+  /// If set, [loadWav] throws this — used to test the error path.
+  Object? loadError;
+
+  /// What [loadWav] returns when it succeeds. Defaults to a tiny two-column
+  /// waveform so widgets have something to draw.
+  ClipInfo loadResult = ClipInfo(
+    sampleRate: 48000,
+    channels: 1,
+    frames: 48000,
+    durationSecs: 1.0,
+    waveformMin: Float32List.fromList(const [-0.5, -1.0]),
+    waveformMax: Float32List.fromList(const [0.5, 1.0]),
+  );
 
   @override
-  Future<void> start() async {
-    if (startError != null) throw startError!;
-    startCount++;
+  Future<ClipInfo> loadWav(String path) async {
+    if (loadError != null) throw loadError!;
+    loadedPaths.add(path);
     _running = true;
+    return loadResult;
   }
 
   @override
-  Future<void> stop() async {
-    stopCount++;
-    _running = false;
-  }
+  void play() => playCount++;
 
   @override
-  void setFrequency(double hz) => frequencies.add(hz);
+  void pause() => pauseCount++;
+
+  @override
+  void stop() => stopCount++;
+
+  @override
+  void seek(double secs) => seeks.add(secs);
 
   @override
   bool get isRunning => _running;
 
-  /// Scope frames are driven manually in tests via [emitScopeFrame]. Defaults to
-  /// no events (a flat scope) so widgets settle under `pumpAndSettle` — we never
-  /// want a free-running periodic stream in a widget test.
+  /// Streams are driven manually in tests via [emitScopeFrame] /
+  /// [emitPlaybackState]. They default to no events so widgets settle under
+  /// `pumpAndSettle` — we never want a free-running periodic stream in a test.
   final StreamController<Float32List> _scope =
       StreamController<Float32List>.broadcast();
+  final StreamController<PlaybackState> _playback =
+      StreamController<PlaybackState>.broadcast();
 
   @override
   Stream<Float32List> get scopeFrames => _scope.stream;
 
-  /// Push one frame to any [scopeFrames] listeners.
+  @override
+  Stream<PlaybackState> get playbackState => _playback.stream;
+
   void emitScopeFrame(Float32List frame) => _scope.add(frame);
+  void emitPlaybackState(PlaybackState state) => _playback.add(state);
 
-  /// The most recent frequency pushed, or null if none.
-  double? get lastFrequency => frequencies.isEmpty ? null : frequencies.last;
+  /// The most recent path passed to [loadWav], or null if none.
+  String? get lastLoadedPath => loadedPaths.isEmpty ? null : loadedPaths.last;
 
-  void dispose() => _scope.close();
+  void dispose() {
+    _scope.close();
+    _playback.close();
+  }
 }

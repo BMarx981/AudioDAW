@@ -13,6 +13,13 @@ cpal = "0.15"
 # Lock-free single-producer/single-consumer ring buffer for control -> audio
 # messaging. Wait-free push/pop, no allocation — safe on the audio thread.
 rtrb = "0.3"
+# Audio file decoding. CLAUDE.md's documented decode path: WAV now, with
+# FLAC/MP3/AAC/OGG a feature-flag away later. We only enable what Milestone 1
+# needs (the WAV container + PCM codec) to keep build times and binary size down;
+# add `flac`/`mp3`/etc. to `features` when those formats are wanted. Decoding
+# runs on the control thread, never the audio thread, so symphonia allocating
+# internally is fine.
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm"] }
 
 [dev-dependencies]
 # Dev-only guard that aborts if the audio path allocates. See the cfg(test)

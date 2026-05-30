@@ -3,105 +3,194 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:daw/engine/engine_interface.dart';
 import 'package:daw/ui/home_page.dart';
-import 'package:daw/ui/frequency_mapping.dart';
 import 'package:daw/ui/oscilloscope.dart';
+import 'package:daw/ui/waveform_view.dart';
 
 import 'fake_engine.dart';
 
 void main() {
-  group('frequency mapping', () {
-    test('maps slider extremes to 20 Hz and 2000 Hz', () {
-      expect(sliderToHz(0.0), closeTo(20.0, 1e-6));
-      expect(sliderToHz(1.0), closeTo(2000.0, 1e-6));
+  group('WaveformView', () {
+    testWidgets('renders a waveform from min/max data without error', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: WaveformView(
+              min: Float32List.fromList(const [-0.2, -0.8, -0.5]),
+              max: Float32List.fromList(const [0.2, 0.8, 0.5]),
+              positionFraction: 0.25,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.byType(CustomPaint), findsWidgets);
     });
 
-    test('midpoint is the geometric mean (200 Hz)', () {
-      // Log mapping => the centre is sqrt(20 * 2000) = 200 Hz, not 1010.
-      expect(sliderToHz(0.5), closeTo(200.0, 1e-3));
+    testWidgets('handles empty data without error', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: WaveformView(min: Float32List(0), max: Float32List(0)),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
     });
 
-    test('hzToSlider is the inverse of sliderToHz', () {
-      for (final v in [0.0, 0.25, 0.5, 0.75, 1.0]) {
-        expect(hzToSlider(sliderToHz(v)), closeTo(v, 1e-9));
-      }
+    testWidgets('tapping reports a seek fraction in [0, 1]', (tester) async {
+      double? seeked;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 200,
+                child: WaveformView(
+                  min: Float32List.fromList(const [-1, -1]),
+                  max: Float32List.fromList(const [1, 1]),
+                  onSeek: (f) => seeked = f,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // Tap the centre of the 200px-wide waveform => fraction ~0.5.
+      await tester.tap(find.byType(WaveformView));
+      await tester.pump();
+
+      expect(seeked, isNotNull);
+      expect(seeked, closeTo(0.5, 0.05));
     });
   });
 
   group('HomePage', () {
-    testWidgets('dragging the slider pushes the log-mapped frequency', (
+    // A HomePage wired to a fake engine and a stub file picker that returns a
+    // fixed path, so no native dialog is ever shown.
+    Widget homePage(FakeEngine engine, {String? path = '/tmp/test.wav'}) =>
+        MaterialApp(
+          home: HomePage(engine: engine, pickWavPath: () async => path),
+        );
+
+    testWidgets('Open loads a clip and reveals the waveform + transport', (
       tester,
     ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
+      await tester.pumpWidget(homePage(engine));
 
-      // Drag the slider to the right. The exact gesture distance doesn't need to
-      // land on a precise value — we assert the engine was driven and that the
-      // pushed value matches the displayed Hz via the log mapping.
-      await tester.drag(find.byType(Slider), const Offset(500, 0));
+      // Nothing loaded yet.
+      expect(find.byType(WaveformView), findsNothing);
+      expect(find.text('No file loaded'), findsOneWidget);
+
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
+
+      expect(engine.lastLoadedPath, '/tmp/test.wav');
+      expect(find.byType(WaveformView), findsOneWidget);
+      expect(find.text('Play'), findsOneWidget);
+      expect(find.text('test.wav'), findsOneWidget);
+    });
+
+    testWidgets('a cancelled pick loads nothing', (tester) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine, path: null)); // user cancels
+
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
+
+      expect(engine.loadedPaths, isEmpty);
+      expect(find.byType(WaveformView), findsNothing);
+    });
+
+    testWidgets('Play and Pause drive the engine and toggle the label', (
+      tester,
+    ) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Play'));
       await tester.pump();
+      expect(engine.playCount, 1);
+      expect(find.text('Pause'), findsOneWidget);
 
-      expect(
-        engine.frequencies,
-        isNotEmpty,
-        reason: 'slider drag should call setFrequency',
-      );
-
-      final hz = engine.lastFrequency!;
-      expect(find.text('${hz.toStringAsFixed(1)} Hz'), findsOneWidget);
-      expect(hz, inInclusiveRange(kMinHz, kMaxHz));
-    });
-
-    testWidgets('Play starts the engine and pushes the initial frequency', (
-      tester,
-    ) async {
-      final engine = FakeEngine();
-      addTearDown(engine.dispose);
-      await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
-
-      await tester.tap(find.text('Play'));
-      await tester.pumpAndSettle();
-
-      expect(engine.startCount, 1);
-      expect(
-        engine.frequencies,
-        isNotEmpty,
-        reason: 'Play should send the current frequency to the engine',
-      );
-      expect(find.text('Stop'), findsOneWidget);
-    });
-
-    testWidgets('Stop stops the engine', (tester) async {
-      final engine = FakeEngine();
-      addTearDown(engine.dispose);
-      await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
-
-      await tester.tap(find.text('Play'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Stop'));
-      await tester.pumpAndSettle();
-
-      expect(engine.stopCount, 1);
+      await tester.tap(find.text('Pause'));
+      await tester.pump();
+      expect(engine.pauseCount, 1);
       expect(find.text('Play'), findsOneWidget);
     });
 
-    testWidgets('a start error surfaces as a snackbar and stays stopped', (
+    testWidgets('Stop stops the engine and rewinds', (tester) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Stop'));
+      await tester.pump();
+
+      expect(engine.stopCount, 1);
+    });
+
+    testWidgets('playback-status stream advances the position label', (
       tester,
     ) async {
-      final engine = FakeEngine()..startError = 'no audio device';
+      final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
+      await tester.pumpWidget(homePage(engine)); // 1.0s clip
 
-      await tester.tap(find.text('Play'));
-      await tester.pump(); // build the snackbar
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
 
-      expect(find.textContaining('no audio device'), findsOneWidget);
-      expect(
-        find.text('Play'),
-        findsOneWidget,
-        reason: 'should remain stopped',
+      engine.emitPlaybackState(
+        const PlaybackState(positionSecs: 0.5, playing: true),
       );
+      await tester.pumpAndSettle(); // let the broadcast-stream event deliver
+
+      // 0.5 s of a 1.0 s clip.
+      expect(find.textContaining('00:00.5 / 00:01.0'), findsOneWidget);
+    });
+
+    testWidgets('scrubbing the waveform seeks the engine', (tester) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(WaveformView));
+      await tester.pump();
+
+      expect(engine.seeks, isNotEmpty, reason: 'a tap should seek');
+      // Seek target is within the clip's 1.0 s duration.
+      expect(engine.seeks.last, inInclusiveRange(0.0, 1.0));
+    });
+
+    testWidgets('a load error surfaces as a snackbar', (tester) async {
+      final engine = FakeEngine()..loadError = 'not a wav';
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pump(); // run the load future + build the snackbar
+      await tester.pump();
+
+      expect(find.textContaining('not a wav'), findsOneWidget);
+      expect(find.byType(WaveformView), findsNothing);
     });
   });
 
@@ -109,32 +198,18 @@ void main() {
     testWidgets('renders on the home page', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
-
-      expect(find.byType(Oscilloscope), findsOneWidget);
-      // A frame arriving repaints without throwing.
-      engine.emitScopeFrame(
-        Float32List.fromList(
-          List.generate(256, (i) => (i.isEven ? 0.5 : -0.5)),
-        ),
-      );
-      await tester.pump();
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('handles an empty frame (flat trace) without error', (
-      tester,
-    ) async {
       await tester.pumpWidget(
         MaterialApp(
-          home: Scaffold(
-            body: Oscilloscope(frames: Stream.value(Float32List(0))),
-          ),
+          home: HomePage(engine: engine, pickWavPath: () async => null),
         ),
+      );
+
+      expect(find.byType(Oscilloscope), findsOneWidget);
+      engine.emitScopeFrame(
+        Float32List.fromList(List.generate(256, (i) => i.isEven ? 0.5 : -0.5)),
       );
       await tester.pump();
       expect(tester.takeException(), isNull);
-      expect(find.byType(CustomPaint), findsWidgets);
     });
   });
 }
