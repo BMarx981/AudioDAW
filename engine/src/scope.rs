@@ -161,10 +161,7 @@ mod tests {
             "frame should start near a zero crossing, got {}",
             frame[0]
         );
-        assert!(
-            frame[1] > frame[0],
-            "frame should start on the rising edge"
-        );
+        assert!(frame[1] > frame[0], "frame should start on the rising edge");
     }
 
     #[test]
@@ -174,6 +171,10 @@ mod tests {
             let _ = tx.push(i as f32);
         }
         let frame = reader.frame();
-        assert_eq!(frame.len(), 100, "before a full window, return what we have");
+        assert_eq!(
+            frame.len(),
+            100,
+            "before a full window, return what we have"
+        );
     }
 }

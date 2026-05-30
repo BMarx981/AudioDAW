@@ -1,0 +1,16 @@
+# Root cargo workspace for the DAW's Rust engine.
+#
+# Right now there is a single member, `engine/`, but CLAUDE.md's architecture
+# splits the engine into several crates (core/dsp/graph/host/io/bridge) over
+# time. Adding the workspace now means `cargo fmt/clippy/test --workspace` work
+# from the repo root today and keep working as those crates land — just append
+# them to `members`.
+#
+# Note on the build: cargokit (the Flutter macOS/iOS Rust build hook) invokes
+# cargo with an explicit `--manifest-path engine/Cargo.toml -p engine` and its
+# own `--target-dir`, so it doesn't care where this workspace puts `target/`.
+# The relocation of `target/` to the repo root only affects local `cargo`
+# invocations, which is what we want for `scripts/check.sh`.
+[workspace]
+resolver = "2"
+members = ["engine"]

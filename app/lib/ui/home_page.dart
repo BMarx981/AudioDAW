@@ -49,9 +49,9 @@ class _HomePageState extends State<HomePage> {
       setState(() => _playing = !_playing);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Audio engine error: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Audio engine error: $e')));
       }
     } finally {
       if (mounted) setState(() => _busy = false);

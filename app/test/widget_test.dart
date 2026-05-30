@@ -29,8 +29,9 @@ void main() {
   });
 
   group('HomePage', () {
-    testWidgets('dragging the slider pushes the log-mapped frequency',
-        (tester) async {
+    testWidgets('dragging the slider pushes the log-mapped frequency', (
+      tester,
+    ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
       await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
@@ -41,16 +42,20 @@ void main() {
       await tester.drag(find.byType(Slider), const Offset(500, 0));
       await tester.pump();
 
-      expect(engine.frequencies, isNotEmpty,
-          reason: 'slider drag should call setFrequency');
+      expect(
+        engine.frequencies,
+        isNotEmpty,
+        reason: 'slider drag should call setFrequency',
+      );
 
       final hz = engine.lastFrequency!;
       expect(find.text('${hz.toStringAsFixed(1)} Hz'), findsOneWidget);
       expect(hz, inInclusiveRange(kMinHz, kMaxHz));
     });
 
-    testWidgets('Play starts the engine and pushes the initial frequency',
-        (tester) async {
+    testWidgets('Play starts the engine and pushes the initial frequency', (
+      tester,
+    ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
       await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
@@ -59,8 +64,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(engine.startCount, 1);
-      expect(engine.frequencies, isNotEmpty,
-          reason: 'Play should send the current frequency to the engine');
+      expect(
+        engine.frequencies,
+        isNotEmpty,
+        reason: 'Play should send the current frequency to the engine',
+      );
       expect(find.text('Stop'), findsOneWidget);
     });
 
@@ -78,8 +86,9 @@ void main() {
       expect(find.text('Play'), findsOneWidget);
     });
 
-    testWidgets('a start error surfaces as a snackbar and stays stopped',
-        (tester) async {
+    testWidgets('a start error surfaces as a snackbar and stays stopped', (
+      tester,
+    ) async {
       final engine = FakeEngine()..startError = 'no audio device';
       addTearDown(engine.dispose);
       await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
@@ -88,7 +97,11 @@ void main() {
       await tester.pump(); // build the snackbar
 
       expect(find.textContaining('no audio device'), findsOneWidget);
-      expect(find.text('Play'), findsOneWidget, reason: 'should remain stopped');
+      expect(
+        find.text('Play'),
+        findsOneWidget,
+        reason: 'should remain stopped',
+      );
     });
   });
 
@@ -100,20 +113,25 @@ void main() {
 
       expect(find.byType(Oscilloscope), findsOneWidget);
       // A frame arriving repaints without throwing.
-      engine.emitScopeFrame(Float32List.fromList(
-        List.generate(256, (i) => (i.isEven ? 0.5 : -0.5)),
-      ));
+      engine.emitScopeFrame(
+        Float32List.fromList(
+          List.generate(256, (i) => (i.isEven ? 0.5 : -0.5)),
+        ),
+      );
       await tester.pump();
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('handles an empty frame (flat trace) without error',
-        (tester) async {
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: Oscilloscope(frames: Stream.value(Float32List(0))),
+    testWidgets('handles an empty frame (flat trace) without error', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Oscilloscope(frames: Stream.value(Float32List(0))),
+          ),
         ),
-      ));
+      );
       await tester.pump();
       expect(tester.takeException(), isNull);
       expect(find.byType(CustomPaint), findsWidgets);

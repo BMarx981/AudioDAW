@@ -12,9 +12,9 @@ const double kMaxHz = 2000.0;
 const double _decades = kMaxHz / kMinHz; // 100
 
 /// Slider position (0..1) -> frequency in Hz.
-double sliderToHz(double value) => kMinHz * math.pow(_decades, value).toDouble();
+double sliderToHz(double value) =>
+    kMinHz * math.pow(_decades, value).toDouble();
 
 /// Frequency in Hz -> slider position (0..1). Inverse of [sliderToHz], used to
 /// place the slider thumb for an initial frequency.
-double hzToSlider(double hz) =>
-    math.log(hz / kMinHz) / math.log(_decades);
+double hzToSlider(double hz) => math.log(hz / kMinHz) / math.log(_decades);

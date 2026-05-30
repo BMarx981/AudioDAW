@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+# Always run from the repo root regardless of where the script is invoked, so
+# the cargo workspace and the relative paths below resolve the same every time.
+cd "$(dirname "$0")/.."
+
 # Colors
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -23,14 +27,17 @@ step "Rust clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 
 step "Dart format check"
-(cd app && dart format --output=none --set-exit-if-changed .)
+# Only our own source — not generated bridge output, the build/ dir, or the
+# vendored cargokit Dart under rust_builder/, none of which we own or format.
+(cd app && dart format --output=none --set-exit-if-changed lib test integration_test)
 
 step "Flutter analyze"
 (cd app && flutter analyze)
 
 # Stage 2: Bridge regeneration check
 step "Bridge regeneration check"
-flutter_rust_bridge_codegen generate
+# Codegen reads app/flutter_rust_bridge.yaml, so it must run from app/.
+(cd app && flutter_rust_bridge_codegen generate)
 if ! git diff --exit-code --quiet; then
   echo -e "${RED}Bridge code is out of sync. Commit the regenerated files.${NC}"
   exit 1

@@ -23,7 +23,11 @@ void main() {
     await tester.pumpAndSettle();
 
     // The Rust side reports the stream is live, and the UI flipped to Stop.
-    expect(engine.isRunning, isTrue, reason: 'engine should report a running stream');
+    expect(
+      engine.isRunning,
+      isTrue,
+      reason: 'engine should report a running stream',
+    );
     expect(find.text('Stop'), findsOneWidget);
 
     // Drive a couple of frequencies to make sure the control path doesn't throw.
