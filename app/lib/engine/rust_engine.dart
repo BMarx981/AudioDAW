@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../src/rust/api/engine_api.dart' as rust;
 import 'engine_interface.dart';
 
@@ -18,4 +20,11 @@ class RustEngine implements EngineInterface {
 
   @override
   bool get isRunning => rust.isRunning();
+
+  /// Cached so repeated reads don't each spawn a Rust-side pump thread.
+  Stream<Float32List>? _scopeFrames;
+
+  @override
+  Stream<Float32List> get scopeFrames =>
+      _scopeFrames ??= rust.scopeStream().asBroadcastStream();
 }

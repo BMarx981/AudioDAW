@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 /// The seam between the UI and the audio engine.
 ///
 /// Per TESTING.md the UI never talks to the Rust bridge directly — it depends on
@@ -18,4 +20,11 @@ abstract class EngineInterface {
 
   /// Whether the engine is currently playing.
   bool get isRunning;
+
+  /// A stream of oscilloscope frames. Each event is one trigger-aligned window
+  /// of mono samples in [-1, 1] to plot. Emits an empty frame while stopped.
+  ///
+  /// Subscribe once and cache it — the production implementation spawns a pump
+  /// per subscription, so don't read this getter on every build.
+  Stream<Float32List> get scopeFrames;
 }

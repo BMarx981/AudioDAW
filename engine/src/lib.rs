@@ -5,6 +5,7 @@
 //! - [`audio`]    — cpal stream + the realtime callback
 //! - [`osc`]      — the sine oscillator
 //! - [`commands`] — the lock-free control->audio ring buffer
+//! - [`scope`]    — the lock-free audio->UI sample tap for the oscilloscope
 
 pub mod api;
 mod frb_generated;
@@ -12,6 +13,7 @@ mod frb_generated;
 mod audio;
 mod commands;
 mod osc;
+mod scope;
 
 // In test builds only, install an allocator that lets `assert_no_alloc` detect
 // heap activity on the audio path. This is gated to `cfg(test)` so production

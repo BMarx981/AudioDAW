@@ -27,6 +27,7 @@ use rtrb::{Consumer, Producer};
 
 use crate::commands::{command_channel, Command};
 use crate::osc::SineOsc;
+use crate::scope::{scope_channel, ScopeReader};
 
 /// Frequency the engine starts on before the UI sends its first value.
 const DEFAULT_HZ: f32 = 440.0;
@@ -43,6 +44,10 @@ pub struct Engine {
     stop: Arc<AtomicBool>,
     /// Joined on drop. `Option` so `Drop` can `take` it.
     thread: Option<JoinHandle<()>>,
+    /// UI-side consumer of the oscilloscope tap. The matching producer was moved
+    /// into the audio callback. Drained from the control thread (never the audio
+    /// thread) by [`Engine::scope_frame`].
+    scope: ScopeReader,
 }
 
 impl Engine {
@@ -51,6 +56,9 @@ impl Engine {
     /// stream is up (or failed). Returns an error string on any setup failure.
     pub fn start() -> Result<Self, String> {
         let (producer, consumer) = command_channel();
+        // Audio->UI scope tap. The producer rides into the audio callback; the
+        // reader stays here on the control side.
+        let (scope_tx, scope_rx) = scope_channel();
         let stop = Arc::new(AtomicBool::new(false));
 
         // One-shot channel: the audio thread reports whether the stream came up
@@ -60,7 +68,7 @@ impl Engine {
         let stop_for_thread = stop.clone();
         let thread = std::thread::Builder::new()
             .name("daw-audio".into())
-            .spawn(move || run_audio_thread(consumer, stop_for_thread, ready_tx))
+            .spawn(move || run_audio_thread(consumer, scope_tx, stop_for_thread, ready_tx))
             .map_err(|e| format!("failed to spawn audio thread: {e}"))?;
 
         match ready_rx.recv() {
@@ -68,6 +76,7 @@ impl Engine {
                 producer,
                 stop,
                 thread: Some(thread),
+                scope: scope_rx,
             }),
             Ok(Err(e)) => {
                 let _ = thread.join();
@@ -83,6 +92,13 @@ impl Engine {
     /// runs on the control thread, never the audio thread.
     pub fn set_frequency(&mut self, hz: f32) {
         let _ = self.producer.push(Command::SetFrequency(hz));
+    }
+
+    /// Drain the oscilloscope tap and return one trigger-aligned window of recent
+    /// samples for the UI to draw. Runs on the control thread (it allocates a
+    /// small `Vec`); never call it from the audio thread.
+    pub fn scope_frame(&mut self) -> Vec<f32> {
+        self.scope.frame()
     }
 }
 
@@ -102,10 +118,11 @@ impl Drop for Engine {
 /// it is created and dropped on this one thread.
 fn run_audio_thread(
     consumer: Consumer<Command>,
+    scope_tx: Producer<f32>,
     stop: Arc<AtomicBool>,
     ready_tx: mpsc::Sender<Result<(), String>>,
 ) {
-    let stream = match build_stream(consumer) {
+    let stream = match build_stream(consumer, scope_tx) {
         Ok(s) => s,
         Err(e) => {
             let _ = ready_tx.send(Err(e));
@@ -130,7 +147,10 @@ fn run_audio_thread(
 /// state (the oscillator) is allocated here, *before* the callback ever runs,
 /// then moved into the callback closure. Nothing is allocated inside the
 /// callback itself.
-fn build_stream(consumer: Consumer<Command>) -> Result<cpal::Stream, String> {
+fn build_stream(
+    consumer: Consumer<Command>,
+    scope_tx: Producer<f32>,
+) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -149,6 +169,7 @@ fn build_stream(consumer: Consumer<Command>) -> Result<cpal::Stream, String> {
     // the callback below and never reallocated.
     let mut osc = SineOsc::new(sample_rate, DEFAULT_HZ);
     let mut consumer = consumer;
+    let mut scope_tx = scope_tx;
 
     let err_fn = |_err: cpal::StreamError| {
         // Fires only on stream-level errors (device unplugged, etc.), never per
@@ -163,7 +184,7 @@ fn build_stream(consumer: Consumer<Command>) -> Result<cpal::Stream, String> {
             .build_output_stream(
                 &config.into(),
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    audio_callback(data, channels, &mut osc, &mut consumer);
+                    audio_callback(data, channels, &mut osc, &mut consumer, &mut scope_tx);
                 },
                 err_fn,
                 None,
@@ -178,6 +199,7 @@ fn build_stream(consumer: Consumer<Command>) -> Result<cpal::Stream, String> {
 /// hard per-buffer deadline. Everything here must be allocation-free,
 /// lock-free, and panic-free:
 ///   - draining the ring with `pop()` is wait-free and never allocates
+///   - pushing to the scope ring with `push()` is wait-free and never allocates
 ///   - the oscillator only does stack arithmetic
 ///   - no `unwrap`, no `Mutex`, no `println!`
 #[inline]
@@ -186,6 +208,7 @@ fn audio_callback(
     channels: usize,
     osc: &mut SineOsc,
     consumer: &mut Consumer<Command>,
+    scope_tx: &mut Producer<f32>,
 ) {
     // 1. Apply all pending control changes up front. For frequency the last one
     //    wins, which falls out naturally from applying them in order.
@@ -202,6 +225,10 @@ fn audio_callback(
         for out in frame.iter_mut() {
             *out = s;
         }
+        // 3. Tap the mono signal for the oscilloscope. Wait-free; if the UI has
+        //    fallen behind and the ring is full, the sample is dropped rather
+        //    than blocking the audio thread (`Err(Full)` ignored).
+        let _ = scope_tx.push(s);
     }
 }
 
@@ -217,6 +244,9 @@ mod tests {
         // audio device is opened — we test the callback in isolation.
         let (mut tx, rx) = command_channel();
         let mut consumer = rx;
+        // Scope producer is part of the realtime callback path now, so it must be
+        // exercised under the no-alloc guard too.
+        let (mut scope_tx, _scope_rx) = scope_channel();
         let mut osc = SineOsc::new(48_000.0, DEFAULT_HZ);
         let mut buf = [0.0_f32; 512]; // pre-allocated, stereo-interleavable
         let channels = 2;
@@ -225,7 +255,7 @@ mod tests {
         for i in 0..1000 {
             let _ = tx.push(Command::SetFrequency(200.0 + (i % 800) as f32));
             assert_no_alloc(|| {
-                audio_callback(&mut buf, channels, &mut osc, &mut consumer);
+                audio_callback(&mut buf, channels, &mut osc, &mut consumer, &mut scope_tx);
             });
         }
     }

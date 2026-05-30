@@ -29,3 +29,21 @@ void setFrequency({required double hz}) =>
 
 /// Whether the engine is currently running. Handy for the UI to reflect state.
 bool isRunning() => RustLib.instance.api.crateApiEngineApiIsRunning();
+
+/// Stream of oscilloscope frames for the UI to draw.
+///
+/// Each item is one trigger-aligned window of mono samples (`Float32List` in
+/// Dart). Subscribe once; the returned Dart `Stream` stays live for the app's
+/// lifetime, emitting an empty frame while stopped and real audio while playing.
+///
+/// ## How this stays off the audio thread
+///
+/// The audio callback only ever *pushes* samples into a lock-free ring (see
+/// [`crate::scope`]) — wait-free, no allocation. This function spawns an
+/// ordinary background thread (the "pump") that wakes ~60×/sec, briefly locks
+/// the control-side engine, drains the ring into one window, and hands it to
+/// Dart via `sink`. Nothing here runs on, or blocks, the realtime thread.
+///
+/// The pump exits when Dart cancels the subscription (`sink.add` returns `Err`).
+Stream<Float32List> scopeStream() =>
+    RustLib.instance.api.crateApiEngineApiScopeStream();

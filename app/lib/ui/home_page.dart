@@ -1,9 +1,13 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../engine/engine_interface.dart';
 import 'frequency_mapping.dart';
+import 'oscilloscope.dart';
 
-/// The entire Milestone 0 UI: a play/stop button and a frequency slider.
+/// The entire Milestone 0 UI: a play/stop button, a frequency slider, and a live
+/// oscilloscope of the generated waveform.
 ///
 /// The widget stays dumb — it owns only view state (slider position, playing
 /// flag) and forwards intent to the injected [EngineInterface]. It never
@@ -23,6 +27,10 @@ class _HomePageState extends State<HomePage> {
   double _slider = hzToSlider(440.0);
   bool _playing = false;
   bool _busy = false; // guards against double taps while start/stop awaits
+
+  // Subscribe to the scope once; the engine spawns a pump per subscription, so
+  // we must not read this getter on every build.
+  late final Stream<Float32List> _scopeFrames = widget.engine.scopeFrames;
 
   double get _hz => sliderToHz(_slider);
 
@@ -73,6 +81,8 @@ class _HomePageState extends State<HomePage> {
                   '${_hz.toStringAsFixed(1)} Hz',
                   style: Theme.of(context).textTheme.displaySmall,
                 ),
+                const SizedBox(height: 24),
+                Oscilloscope(frames: _scopeFrames),
                 const SizedBox(height: 24),
                 Slider(
                   value: _slider,

@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:daw/engine/engine_interface.dart';
 
 /// Test double for [EngineInterface]. Records calls so tests can assert on them,
@@ -31,6 +34,20 @@ class FakeEngine implements EngineInterface {
   @override
   bool get isRunning => _running;
 
+  /// Scope frames are driven manually in tests via [emitScopeFrame]. Defaults to
+  /// no events (a flat scope) so widgets settle under `pumpAndSettle` — we never
+  /// want a free-running periodic stream in a widget test.
+  final StreamController<Float32List> _scope =
+      StreamController<Float32List>.broadcast();
+
+  @override
+  Stream<Float32List> get scopeFrames => _scope.stream;
+
+  /// Push one frame to any [scopeFrames] listeners.
+  void emitScopeFrame(Float32List frame) => _scope.add(frame);
+
   /// The most recent frequency pushed, or null if none.
   double? get lastFrequency => frequencies.isEmpty ? null : frequencies.last;
+
+  void dispose() => _scope.close();
 }

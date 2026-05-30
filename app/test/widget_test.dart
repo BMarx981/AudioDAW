@@ -1,8 +1,11 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:daw/ui/home_page.dart';
 import 'package:daw/ui/frequency_mapping.dart';
+import 'package:daw/ui/oscilloscope.dart';
 
 import 'fake_engine.dart';
 
@@ -29,6 +32,7 @@ void main() {
     testWidgets('dragging the slider pushes the log-mapped frequency',
         (tester) async {
       final engine = FakeEngine();
+      addTearDown(engine.dispose);
       await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
 
       // Drag the slider to the right. The exact gesture distance doesn't need to
@@ -48,6 +52,7 @@ void main() {
     testWidgets('Play starts the engine and pushes the initial frequency',
         (tester) async {
       final engine = FakeEngine();
+      addTearDown(engine.dispose);
       await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
 
       await tester.tap(find.text('Play'));
@@ -61,6 +66,7 @@ void main() {
 
     testWidgets('Stop stops the engine', (tester) async {
       final engine = FakeEngine();
+      addTearDown(engine.dispose);
       await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
 
       await tester.tap(find.text('Play'));
@@ -75,6 +81,7 @@ void main() {
     testWidgets('a start error surfaces as a snackbar and stays stopped',
         (tester) async {
       final engine = FakeEngine()..startError = 'no audio device';
+      addTearDown(engine.dispose);
       await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
 
       await tester.tap(find.text('Play'));
@@ -82,6 +89,34 @@ void main() {
 
       expect(find.textContaining('no audio device'), findsOneWidget);
       expect(find.text('Play'), findsOneWidget, reason: 'should remain stopped');
+    });
+  });
+
+  group('Oscilloscope', () {
+    testWidgets('renders on the home page', (tester) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(MaterialApp(home: HomePage(engine: engine)));
+
+      expect(find.byType(Oscilloscope), findsOneWidget);
+      // A frame arriving repaints without throwing.
+      engine.emitScopeFrame(Float32List.fromList(
+        List.generate(256, (i) => (i.isEven ? 0.5 : -0.5)),
+      ));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('handles an empty frame (flat trace) without error',
+        (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Oscilloscope(frames: Stream.value(Float32List(0))),
+        ),
+      ));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.byType(CustomPaint), findsWidgets);
     });
   });
 }
