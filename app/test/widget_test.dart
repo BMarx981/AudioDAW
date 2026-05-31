@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:daw/engine/engine_interface.dart';
+import 'package:daw/ui/channel_strip.dart';
 import 'package:daw/ui/home_page.dart';
 import 'package:daw/ui/oscilloscope.dart';
 import 'package:daw/ui/waveform_view.dart';
@@ -191,6 +192,165 @@ void main() {
 
       expect(find.textContaining('not a wav'), findsOneWidget);
       expect(find.byType(WaveformView), findsNothing);
+    });
+
+    testWidgets('the channel strip appears once a clip is loaded', (
+      tester,
+    ) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+
+      expect(find.byType(ChannelStrip), findsNothing);
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelStrip), findsOneWidget);
+    });
+
+    testWidgets('dragging gain and pan drives the engine', (tester) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
+
+      // Four sliders: the three gain faders (db6, linear, db12) then pan.
+      final sliders = find.byType(Slider);
+      expect(sliders, findsNWidgets(4));
+
+      // The strip lives below the fold in the test surface; scroll each control
+      // into view before dragging it. The active gain fader (db6) is first.
+      await tester.ensureVisible(sliders.at(0));
+      await tester.drag(sliders.at(0), const Offset(0, 40)); // gain fader
+      await tester.pump();
+      await tester.ensureVisible(sliders.at(3));
+      await tester.drag(sliders.at(3), const Offset(-60, 0)); // pan toward left
+      await tester.pump();
+
+      expect(
+        engine.gainLinears,
+        isNotEmpty,
+        reason: 'gain drag should reach engine',
+      );
+      expect(engine.pans, isNotEmpty, reason: 'pan drag should reach engine');
+      // Dragging the pan slider left moves toward -1.
+      expect(engine.pans.last, lessThan(0.0));
+      // Gain is a non-negative linear multiplier.
+      expect(engine.gainLinears.last, greaterThanOrEqualTo(0.0));
+    });
+
+    testWidgets('the loop button toggles looping on the engine', (
+      tester,
+    ) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+      await tester.tap(find.text('Open WAV…'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Loop'));
+      await tester.pump();
+      expect(engine.loopings, [true]);
+
+      await tester.tap(find.byTooltip('Loop'));
+      await tester.pump();
+      expect(engine.loopings, [true, false]);
+    });
+
+    testWidgets('switching the active fader reports a mode change', (
+      tester,
+    ) async {
+      GainFaderMode? mode;
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: ChannelStrip(
+                gainLinear: 1,
+                gainMode: GainFaderMode.db6,
+                pan: 0,
+                meter: engine.meterLevels,
+                onGainModeChanged: (m) => mode = m,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // 'Lin' appears both on the segment and the fader's own label; target the
+      // segment.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(SegmentedButton<GainFaderMode>),
+          matching: find.text('Lin'),
+        ),
+      );
+      await tester.pump();
+      expect(mode, GainFaderMode.linear);
+    });
+  });
+
+  group('ChannelStrip', () {
+    Widget host(
+      FakeEngine engine, {
+      double gainLinear = 1,
+      GainFaderMode gainMode = GainFaderMode.db6,
+      double pan = 0,
+      ValueChanged<double>? onGainLinear,
+      ValueChanged<double>? onPan,
+    }) => MaterialApp(
+      home: Scaffold(
+        body: Center(
+          child: ChannelStrip(
+            gainLinear: gainLinear,
+            gainMode: gainMode,
+            pan: pan,
+            meter: engine.meterLevels,
+            onGainLinearChanged: onGainLinear,
+            onPanChanged: onPan,
+          ),
+        ),
+      ),
+    );
+
+    testWidgets('renders three gain faders, a pan slider, and a meter', (
+      tester,
+    ) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(host(engine, gainLinear: 1, pan: 0));
+
+      expect(find.byType(Slider), findsNWidgets(4)); // 3 gain + 1 pan
+      expect(find.byType(SegmentedButton<GainFaderMode>), findsOneWidget);
+      expect(find.text('dB  −60…+6'), findsOneWidget); // active-mode caption
+      expect(find.text('C'), findsOneWidget); // centered pan
+      // At unity, both dB faders read +0.0 dB and the linear fader reads 1.00×.
+      expect(find.text('+0.0 dB'), findsNWidgets(2));
+      expect(find.text('1.00×'), findsOneWidget);
+    });
+
+    testWidgets('mute reads -∞ on the dB faders; off-center pan as L/R', (
+      tester,
+    ) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(host(engine, gainLinear: 0, pan: -0.5));
+
+      // Both dB faders (db6, db12) read -∞ at a muted gain.
+      expect(find.text('-∞'), findsNWidgets(2));
+      expect(find.text('L 50'), findsOneWidget);
+    });
+
+    testWidgets('meter stream updates repaint without error', (tester) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(host(engine));
+
+      engine.emitMeterLevels(const MeterLevels(peakLeft: 0.8, peakRight: 0.3));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
     });
   });
 

@@ -27,6 +27,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<MeterLevels> dco_decode_StreamSink_meter_levels_Sse(
+    dynamic raw,
+  );
+
+  @protected
   RustStreamSink<PlaybackStatus> dco_decode_StreamSink_playback_status_Sse(
     dynamic raw,
   );
@@ -53,6 +58,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LoadedClip dco_decode_loaded_clip(dynamic raw);
 
   @protected
+  MeterLevels dco_decode_meter_levels(dynamic raw);
+
+  @protected
   PlaybackStatus dco_decode_playback_status(dynamic raw);
 
   @protected
@@ -72,6 +80,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RustStreamSink<Float32List> sse_decode_StreamSink_list_prim_f_32_strict_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RustStreamSink<MeterLevels> sse_decode_StreamSink_meter_levels_Sse(
     SseDeserializer deserializer,
   );
 
@@ -102,6 +115,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LoadedClip sse_decode_loaded_clip(SseDeserializer deserializer);
 
   @protected
+  MeterLevels sse_decode_meter_levels(SseDeserializer deserializer);
+
+  @protected
   PlaybackStatus sse_decode_playback_status(SseDeserializer deserializer);
 
   @protected
@@ -128,6 +144,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_StreamSink_list_prim_f_32_strict_Sse(
     RustStreamSink<Float32List> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_meter_levels_Sse(
+    RustStreamSink<MeterLevels> self,
     SseSerializer serializer,
   );
 
@@ -163,6 +185,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_loaded_clip(LoadedClip self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_meter_levels(MeterLevels self, SseSerializer serializer);
 
   @protected
   void sse_encode_playback_status(

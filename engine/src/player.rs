@@ -1,31 +1,37 @@
-//! [`WavPlayer`] — the realtime audio source for Milestone 1.
+//! [`WavPlayer`] — the realtime audio source.
 //!
-//! This is the mirror of [`crate::osc::SineOsc`]: instead of synthesizing a
-//! sine, it streams a pre-decoded [`AudioClip`] through the audio callback. As
-//! with everything on the audio thread, every method here is **allocation-free,
+//! Streams a pre-decoded [`AudioClip`] through the audio callback. As with
+//! everything on the audio thread, every method here is **allocation-free,
 //! lock-free, and panic-free**.
+//!
+//! ## Planar output (changed in Milestone 2)
+//!
+//! The player renders into **planar** buffers — one `&mut [f32]` per channel,
+//! deinterleaved — rather than writing interleaved device frames directly. This
+//! is the engine's internal format (CLAUDE.md: "f32, deinterleaved internally")
+//! and it's what lets the DSP units ([`crate::dsp`]) process the signal before
+//! it's interleaved onto the device at the very end (see [`crate::strip`]). The
+//! internal bus is **stereo**: a mono clip is duplicated to both sides, a stereo
+//! clip maps channel-for-channel, and any extra clip channels are ignored.
 //!
 //! ## Resampling, and why it lives in the callback
 //!
 //! The clip's sample rate (e.g. 44.1 kHz) often differs from the output
-//! device's (e.g. 48 kHz). If we just read one stored sample per output frame,
-//! the clip would play back at the wrong speed and pitch. So we keep a
-//! **fractional** read position `pos` (in clip frames) and advance it by
-//! `clip_rate / device_rate` each output frame, linearly interpolating between
-//! the two nearest stored samples. This is realtime-safe (pure stack
-//! arithmetic, no allocation) and handles any rate ratio. Linear interpolation
-//! has a gentle high-frequency rolloff — fine for Milestone 1; a later milestone
-//! can swap in a higher-quality resampler if it matters.
+//! device's (e.g. 48 kHz). We keep a **fractional** read position `pos` (in clip
+//! frames) and advance it by `clip_rate / device_rate` each output frame,
+//! linearly interpolating between the two nearest stored samples. Realtime-safe
+//! (pure stack arithmetic) and handles any rate ratio. Linear interpolation has
+//! a gentle high-frequency rolloff — fine here; a later milestone can swap in a
+//! higher-quality resampler.
 //!
 //! ## Sharing the clip without dropping it on the audio thread
 //!
 //! The player holds `Option<Arc<AudioClip>>`. Receiving a new clip is a *move*
-//! (the `Arc` is popped out of a ring — no refcount change). Replacing the old
-//! clip yields the displaced `Arc`, which the caller (the audio callback) must
-//! NOT drop here: dropping the last `Arc` frees the buffer, and freeing on the
-//! audio thread is forbidden. So [`WavPlayer::set_clip`] *returns* the old `Arc`
-//! and the callback ships it back to the control thread to be dropped. See
-//! [`crate::audio`].
+//! (popped out of a ring — no refcount change). Replacing the old clip yields
+//! the displaced `Arc`, which the caller must NOT drop here (dropping the last
+//! `Arc` frees the buffer, and freeing on the audio thread is forbidden). So
+//! [`WavPlayer::set_clip`] *returns* the old `Arc` and the callback ships it back
+//! to the control thread to be dropped. See [`crate::audio`].
 
 use std::sync::Arc;
 
@@ -34,7 +40,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::clip::AudioClip;
 use crate::commands::Command;
 
-/// Realtime playback of a single [`AudioClip`].
+/// Realtime playback of a single [`AudioClip`], rendered as planar stereo.
 pub struct WavPlayer {
     /// Output device sample rate, in Hz. Fixed for the life of the stream.
     device_rate: f32,
@@ -45,6 +51,8 @@ pub struct WavPlayer {
     pos: f64,
     /// Whether we're actively advancing `pos` and emitting audio.
     playing: bool,
+    /// When true, wrap back to the start at the clip end instead of stopping.
+    looping: bool,
 }
 
 impl WavPlayer {
@@ -56,13 +64,14 @@ impl WavPlayer {
             clip: None,
             pos: 0.0,
             playing: false,
+            looping: false,
         }
     }
 
     /// Swap in a new clip, returning the one it replaced (if any) **without
-    /// dropping it** — the caller is responsible for disposing of it off the
-    /// audio thread. Loading rewinds to the start and leaves playback stopped, so
-    /// a freshly loaded file doesn't blast out immediately.
+    /// dropping it** — the caller disposes of it off the audio thread. Loading
+    /// rewinds to the start and leaves playback stopped, so a freshly loaded file
+    /// doesn't blast out immediately.
     ///
     /// Realtime-safe: `Option::replace` is a move; no allocation, no drop.
     #[inline]
@@ -100,11 +109,14 @@ impl WavPlayer {
                     self.pos = target.min(last);
                 }
             }
+            Command::SetLooping(on) => self.looping = on,
+            // Gain/pan commands are not the player's concern; the owning strip
+            // routes those to the DSP units. Ignored here.
+            Command::SetGainDb(_) | Command::SetGainLinear(_) | Command::SetPan(_) => {}
         }
     }
 
-    /// Current playhead position in clip frames, rounded down. Published to the
-    /// UI (as an atomic) so it can draw a moving playhead. Realtime-safe.
+    /// Current playhead position in clip frames, rounded down. Realtime-safe.
     #[inline]
     pub fn pos_frames(&self) -> i64 {
         self.pos as i64
@@ -116,83 +128,82 @@ impl WavPlayer {
         self.playing
     }
 
-    /// Render one buffer of interleaved output and tap a mono copy into the
-    /// oscilloscope ring. `out.len()` must be a multiple of `channels`.
+    /// Render one block of planar stereo into `left`/`right` (which must be the
+    /// same length — the block's frame count). Fills with silence when stopped,
+    /// paused, or past the clip end.
     ///
     /// **THE REALTIME HOT PATH.** Allocation-free, lock-free, panic-free:
-    /// indexing is bounds-checked but always in range by construction, the scope
-    /// push is wait-free (drops on a full ring rather than blocking).
+    /// indexing is bounds-checked but always in range by construction.
     #[inline]
-    pub fn process(&mut self, out: &mut [f32], channels: usize, scope_tx: &mut Producer<f32>) {
-        // Steps per output frame through the clip. >1 when the clip rate exceeds
-        // the device rate (downsampling), <1 when it's lower (upsampling).
+    pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
+        let frames = left.len().min(right.len());
+
+        // Steps per output frame through the clip. >1 when downsampling, <1 when
+        // upsampling. 0.0 means "emit silence" (no clip, or paused/stopped).
         let step = match &self.clip {
             Some(clip) if self.playing => clip.sample_rate as f64 / self.device_rate as f64,
             _ => 0.0,
         };
 
-        for frame in out.chunks_mut(channels) {
-            let mono = if step > 0.0 {
-                // Safe: `step > 0.0` only when `self.clip` is `Some` and playing.
-                let clip = match &self.clip {
-                    Some(c) => c,
-                    None => unreachable!(),
-                };
+        for f in 0..frames {
+            if step <= 0.0 {
+                // No clip, or paused/stopped.
+                left[f] = 0.0;
+                right[f] = 0.0;
+                continue;
+            }
+            // Safe: `step > 0.0` only when `self.clip` is `Some` and playing.
+            let clip = match &self.clip {
+                Some(c) => c,
+                None => unreachable!(),
+            };
+            let last = clip.frames as f64 - 1.0;
 
-                if self.pos >= clip.frames as f64 - 1.0 {
-                    // Reached the end: stop, hold the playhead at the end, and
-                    // emit silence from here on this buffer.
-                    self.playing = false;
-                    Self::write_silence(frame);
-                    0.0
+            if self.pos >= last {
+                if self.looping && clip.frames > 1 {
+                    // Wrap back toward the start, keeping the fractional
+                    // overshoot so the resampler stays continuous across the
+                    // loop seam. Loop length is (frames-1) so the wrapped
+                    // position lands back in the interpolatable range.
+                    self.pos -= last;
+                    if self.pos >= last {
+                        // Pathologically short clip vs. a big step: never leave
+                        // `pos` out of range (read_stereo reads pos and pos+1).
+                        self.pos = 0.0;
+                    }
                 } else {
-                    let mono = Self::write_frame(clip, self.pos, channels, frame);
-                    self.pos += step;
-                    mono
+                    // Reached the end: stop, hold the playhead, emit silence for
+                    // the rest of this block (and every later one until replayed).
+                    self.playing = false;
+                    left[f] = 0.0;
+                    right[f] = 0.0;
+                    continue;
                 }
-            } else {
-                // No clip, or paused/stopped: output silence.
-                Self::write_silence(frame);
-                0.0
-            };
+            }
 
-            // Feed the scope the mono mix of what we just emitted (flat line when
-            // silent). Wait-free; a full ring just drops the sample.
-            let _ = scope_tx.push(mono);
+            let (l, r) = Self::read_stereo(clip, self.pos);
+            left[f] = l;
+            right[f] = r;
+            self.pos += step;
         }
     }
 
-    /// Write one interleaved output frame by reading the clip at fractional
-    /// position `pos`, mapping clip channels onto the `channels` output channels.
-    /// Returns the mono mix of the frame (for the scope). Realtime-safe.
+    /// Read the clip at fractional position `pos` as a stereo pair, linearly
+    /// interpolating between neighbouring stored samples. Mono clips broadcast to
+    /// both sides; multichannel clips use the first two channels. Realtime-safe.
+    ///
+    /// Caller guarantees `pos < clip.frames - 1`, so `i + 1` is in range.
     #[inline]
-    fn write_frame(clip: &AudioClip, pos: f64, channels: usize, frame: &mut [f32]) -> f32 {
-        let i = pos as usize; // floor; pos < frames-1 guaranteed by caller
+    fn read_stereo(clip: &AudioClip, pos: f64) -> (f32, f32) {
+        let i = pos as usize; // floor
         let frac = (pos - i as f64) as f32;
+        let lerp = |ch: &[f32]| ch[i] + (ch[i + 1] - ch[i]) * frac;
 
-        let mut mono_acc = 0.0;
-        for (c, out) in frame.iter_mut().enumerate() {
-            // Mono clips broadcast to every output channel; multichannel clips
-            // map channel-for-channel, clamping if the device has more channels
-            // than the clip.
-            let src = if clip.channels == 1 {
-                0
-            } else {
-                c.min(clip.channels - 1)
-            };
-            let ch = &clip.data[src];
-            // Linear interpolation between the two neighbouring stored samples.
-            let s = ch[i] + (ch[i + 1] - ch[i]) * frac;
-            *out = s;
-            mono_acc += s;
-        }
-        mono_acc / channels as f32
-    }
-
-    #[inline]
-    fn write_silence(frame: &mut [f32]) {
-        for out in frame.iter_mut() {
-            *out = 0.0;
+        if clip.channels == 1 {
+            let m = lerp(&clip.data[0]);
+            (m, m)
+        } else {
+            (lerp(&clip.data[0]), lerp(&clip.data[1]))
         }
     }
 }
@@ -218,7 +229,6 @@ pub fn retire_channel() -> (Producer<Arc<AudioClip>>, Consumer<Arc<AudioClip>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scope::scope_channel;
     use assert_no_alloc::assert_no_alloc;
 
     fn test_clip(rate: f32, channels: usize, frames: usize) -> Arc<AudioClip> {
@@ -235,27 +245,27 @@ mod tests {
 
     #[test]
     fn silent_until_played() {
-        let (mut scope_tx, _r) = scope_channel();
         let mut player = WavPlayer::new(48_000.0);
         player.set_clip(test_clip(48_000.0, 1, 1000));
         // Loaded but not playing -> silence.
-        let mut buf = [1.0_f32; 256];
-        player.process(&mut buf, 2, &mut scope_tx);
+        let mut l = [1.0_f32; 256];
+        let mut r = [1.0_f32; 256];
+        player.render(&mut l, &mut r);
         assert!(
-            buf.iter().all(|&s| s == 0.0),
+            l.iter().chain(r.iter()).all(|&s| s == 0.0),
             "loaded-but-paused must be silent"
         );
     }
 
     #[test]
     fn play_advances_and_emits_audio() {
-        let (mut scope_tx, _r) = scope_channel();
         let mut player = WavPlayer::new(48_000.0);
         player.set_clip(test_clip(48_000.0, 2, 10_000));
         player.handle(Command::Play);
 
-        let mut buf = [0.0_f32; 512]; // 256 stereo frames
-        player.process(&mut buf, 2, &mut scope_tx);
+        let mut l = [0.0_f32; 256];
+        let mut r = [0.0_f32; 256];
+        player.render(&mut l, &mut r);
 
         assert!(player.is_playing());
         assert_eq!(
@@ -263,21 +273,38 @@ mod tests {
             256,
             "rate-matched playback advances 1:1"
         );
-        // Some non-zero output was produced.
-        assert!(buf.iter().any(|&s| s != 0.0), "playing should emit audio");
+        assert!(
+            l.iter().chain(r.iter()).any(|&s| s != 0.0),
+            "playing should emit audio"
+        );
+    }
+
+    #[test]
+    fn mono_clip_broadcasts_to_both_channels() {
+        let mut player = WavPlayer::new(48_000.0);
+        player.set_clip(test_clip(48_000.0, 1, 10_000));
+        player.handle(Command::Play);
+
+        let mut l = [0.0_f32; 128];
+        let mut r = [0.0_f32; 128];
+        player.render(&mut l, &mut r);
+        // A mono source must produce identical left/right (centered).
+        for (a, b) in l.iter().zip(r.iter()) {
+            assert!((a - b).abs() < 1e-7, "mono should be identical L/R");
+        }
     }
 
     #[test]
     fn resamples_when_rates_differ() {
         // 44.1 kHz clip on a 48 kHz device: position advances by 44100/48000 per
         // output frame, i.e. slower than 1:1.
-        let (mut scope_tx, _r) = scope_channel();
         let mut player = WavPlayer::new(48_000.0);
         player.set_clip(test_clip(44_100.0, 1, 100_000));
         player.handle(Command::Play);
 
-        let mut buf = [0.0_f32; 480]; // 480 mono frames
-        player.process(&mut buf, 1, &mut scope_tx);
+        let mut l = [0.0_f32; 480];
+        let mut r = [0.0_f32; 480];
+        player.render(&mut l, &mut r);
 
         let expected = (480.0 * 44_100.0 / 48_000.0) as i64; // ~441
         assert!(
@@ -289,23 +316,52 @@ mod tests {
 
     #[test]
     fn stops_and_holds_at_end_of_clip() {
-        let (mut scope_tx, _r) = scope_channel();
         let mut player = WavPlayer::new(48_000.0);
         let frames = 300;
         player.set_clip(test_clip(48_000.0, 1, frames));
         player.handle(Command::Play);
 
         // Render more frames than the clip has.
-        let mut buf = [0.0_f32; 512];
-        player.process(&mut buf, 1, &mut scope_tx);
+        let mut l = [0.0_f32; 512];
+        let mut r = [0.0_f32; 512];
+        player.render(&mut l, &mut r);
 
         assert!(!player.is_playing(), "playback should stop at the clip end");
         assert!(player.pos_frames() <= frames as i64);
     }
 
     #[test]
+    fn loops_at_end_instead_of_stopping() {
+        let mut player = WavPlayer::new(48_000.0);
+        let frames = 300;
+        player.set_clip(test_clip(48_000.0, 1, frames));
+        player.handle(Command::SetLooping(true));
+        player.handle(Command::Play);
+
+        // Render well past the clip end (3× its length).
+        let mut l = [0.0_f32; 1000];
+        let mut r = [0.0_f32; 1000];
+        player.render(&mut l, &mut r);
+
+        assert!(
+            player.is_playing(),
+            "looping playback must not stop at the end"
+        );
+        // Position wrapped back into the clip rather than parking at the end.
+        assert!(
+            player.pos_frames() < frames as i64,
+            "position should have wrapped, got {}",
+            player.pos_frames()
+        );
+        // No long run of silence at the tail (it kept producing audio).
+        assert!(
+            l[l.len() - 1] != 0.0 || r[r.len() - 1] != 0.0 || l[l.len() - 2] != 0.0,
+            "looping should keep emitting audio past the end"
+        );
+    }
+
+    #[test]
     fn seek_and_stop_move_the_playhead() {
-        let (mut scope_tx, _r) = scope_channel();
         let mut player = WavPlayer::new(48_000.0);
         player.set_clip(test_clip(48_000.0, 1, 48_000)); // exactly 1 second
 
@@ -318,20 +374,18 @@ mod tests {
 
         player.handle(Command::Stop);
         assert_eq!(player.pos_frames(), 0, "stop rewinds to the start");
-
-        let _ = &mut scope_tx; // silence unused-mut on some toolchains
     }
 
     #[test]
     fn playback_path_does_not_allocate() {
-        // The realtime-safety contract from TESTING.md: exercise the exact
-        // callback path — command handling, clip swap via the rings, and
-        // rendering — all under assert_no_alloc.
-        let (mut scope_tx, _r) = scope_channel();
+        // The realtime-safety contract from TESTING.md: exercise command
+        // handling, clip swap via the rings, and planar rendering under
+        // assert_no_alloc.
         let (mut clip_tx, mut clip_rx) = clip_channel();
         let (mut retire_tx, mut retire_rx) = retire_channel();
         let mut player = WavPlayer::new(48_000.0);
-        let mut buf = [0.0_f32; 512];
+        let mut l = [0.0_f32; 512];
+        let mut r = [0.0_f32; 512];
 
         // Pre-build clips on the control side (allocating here is fine).
         let clips: Vec<Arc<AudioClip>> = (0..4).map(|_| test_clip(44_100.0, 2, 20_000)).collect();
@@ -339,26 +393,20 @@ mod tests {
 
         assert_no_alloc(|| {
             for i in 0..1000 {
-                // Occasionally hand in a new clip via the ring, exactly as the
-                // control thread would.
                 if i % 250 == 0 {
                     if let Some(c) = clip_iter.next() {
                         let _ = clip_tx.push(c);
                     }
                 }
-                // Drain the clip ring and swap, retiring the displaced clip
-                // without dropping it on this (pretend-audio) thread.
                 while let Ok(c) = clip_rx.pop() {
                     if let Some(old) = player.set_clip(c) {
-                        // If the retire ring were full we'd leak rather than drop
-                        // here; with matched capacities it never fills.
                         if let Err(rtrb::PushError::Full(old)) = retire_tx.push(old) {
                             std::mem::forget(old);
                         }
                     }
                 }
                 player.handle(Command::Play);
-                player.process(&mut buf, 2, &mut scope_tx);
+                player.render(&mut l, &mut r);
             }
         });
 

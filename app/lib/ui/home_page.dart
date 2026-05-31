@@ -5,6 +5,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../engine/engine_interface.dart';
+import 'channel_strip.dart';
 import 'oscilloscope.dart';
 import 'waveform_view.dart';
 
@@ -42,12 +43,17 @@ class _HomePageState extends State<HomePage> {
   double _positionSecs = 0;
   bool _playing = false;
   bool _busy = false; // guards the async load against double taps
+  bool _looping = false;
+  double _gainLinear = 1; // unity
+  GainFaderMode _gainMode = GainFaderMode.db6;
+  double _pan = 0; // center
 
   late final StreamSubscription<PlaybackState> _statusSub;
 
-  // Subscribe to the scope once; the engine spawns a pump per subscription, so
-  // we must not read this getter on every build.
+  // Subscribe to the continuous streams once; the engine spawns a pump per
+  // subscription, so we must not read these getters on every build.
   late final Stream<Float32List> _scopeFrames = widget.engine.scopeFrames;
+  late final Stream<MeterLevels> _meterLevels = widget.engine.meterLevels;
 
   @override
   void initState() {
@@ -117,6 +123,11 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  void _toggleLoop() {
+    setState(() => _looping = !_looping);
+    widget.engine.setLooping(_looping);
+  }
+
   void _onSeek(double fraction) {
     if (_clip == null) return;
     final secs = fraction * _duration;
@@ -126,75 +137,114 @@ class _HomePageState extends State<HomePage> {
     widget.engine.seek(secs);
   }
 
+  void _onGainLinearChanged(double linear) {
+    setState(() => _gainLinear = linear);
+    widget.engine.setGainLinear(linear);
+  }
+
+  void _onGainModeChanged(GainFaderMode mode) {
+    setState(() => _gainMode = mode);
+  }
+
+  void _onPanChanged(double pan) {
+    setState(() => _pan = pan);
+    widget.engine.setPan(pan);
+  }
+
   @override
   Widget build(BuildContext context) {
     final clip = _clip;
     return Scaffold(
       appBar: AppBar(title: const Text('WAV Player — Milestone 1')),
       body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 640),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    FilledButton.icon(
-                      onPressed: _busy ? null : _openWav,
-                      icon: const Icon(Icons.folder_open),
-                      label: const Text('Open WAV…'),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Text(
-                        _filename ?? 'No file loaded',
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodyMedium,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                if (clip != null) ...[
-                  WaveformView(
-                    min: clip.waveformMin,
-                    max: clip.waveformMax,
-                    positionFraction: _positionFraction,
-                    onSeek: _onSeek,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '${_fmt(_positionSecs)} / ${_fmt(_duration)}'
-                    '   •   ${clip.sampleRate.toStringAsFixed(0)} Hz'
-                    '   •   ${clip.channels == 1 ? 'mono' : '${clip.channels} ch'}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 16),
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 640),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       FilledButton.icon(
-                        onPressed: _togglePlay,
-                        icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
-                        label: Text(_playing ? 'Pause' : 'Play'),
+                        onPressed: _busy ? null : _openWav,
+                        icon: const Icon(Icons.folder_open),
+                        label: const Text('Open WAV…'),
                       ),
-                      const SizedBox(width: 12),
-                      OutlinedButton.icon(
-                        onPressed: _stop,
-                        icon: const Icon(Icons.stop),
-                        label: const Text('Stop'),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Text(
+                          _filename ?? 'No file loaded',
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 20),
+                  if (clip != null) ...[
+                    WaveformView(
+                      min: clip.waveformMin,
+                      max: clip.waveformMax,
+                      positionFraction: _positionFraction,
+                      onSeek: _onSeek,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${_fmt(_positionSecs)} / ${_fmt(_duration)}'
+                      '   •   ${clip.sampleRate.toStringAsFixed(0)} Hz'
+                      '   •   ${clip.channels == 1 ? 'mono' : '${clip.channels} ch'}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        FilledButton.icon(
+                          onPressed: _togglePlay,
+                          icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
+                          label: Text(_playing ? 'Pause' : 'Play'),
+                        ),
+                        const SizedBox(width: 12),
+                        OutlinedButton.icon(
+                          onPressed: _stop,
+                          icon: const Icon(Icons.stop),
+                          label: const Text('Stop'),
+                        ),
+                        const SizedBox(width: 12),
+                        IconButton(
+                          onPressed: _toggleLoop,
+                          isSelected: _looping,
+                          tooltip: 'Loop',
+                          icon: const Icon(Icons.repeat),
+                          selectedIcon: const Icon(Icons.repeat_on),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    Center(
+                      child: ChannelStrip(
+                        gainLinear: _gainLinear,
+                        gainMode: _gainMode,
+                        pan: _pan,
+                        meter: _meterLevels,
+                        onGainLinearChanged: _onGainLinearChanged,
+                        onGainModeChanged: _onGainModeChanged,
+                        onPanChanged: _onPanChanged,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                  ],
+                  Text(
+                    'Output',
+                    style: Theme.of(context).textTheme.labelMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Oscilloscope(frames: _scopeFrames, height: 200),
                 ],
-                Text('Output', style: Theme.of(context).textTheme.labelMedium),
-                const SizedBox(height: 8),
-                Oscilloscope(frames: _scopeFrames, height: 120),
-              ],
+              ),
             ),
           ),
         ),

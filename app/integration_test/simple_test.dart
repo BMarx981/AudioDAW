@@ -47,10 +47,28 @@ void main() {
       reason: 'loading a WAV should start the audio stream',
     );
 
+    // Start watching the meter before playback so we catch the levels rising.
+    var maxPeak = 0.0;
+    final meterSub = engine.meterLevels.listen((m) {
+      maxPeak = math.max(maxPeak, math.max(m.peakLeft, m.peakRight));
+    });
+    addTearDown(meterSub.cancel);
+
     // Play it, let a few buffers run, then stop.
     await tester.tap(find.text('Play'));
     await tester.pump(const Duration(milliseconds: 150));
     expect(find.text('Pause'), findsOneWidget);
+
+    // The 440 Hz tone should drive the post-fader meter above silence. Pump in
+    // short slices so the ~60 Hz meter pump delivers a few frames to Dart.
+    for (var i = 0; i < 20 && maxPeak <= 0.01; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(
+      maxPeak,
+      greaterThan(0.01),
+      reason: 'playing audio should drive the post-fader meter',
+    );
 
     await tester.tap(find.text('Stop'));
     await tester.pumpAndSettle();

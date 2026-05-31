@@ -3,7 +3,9 @@
 //! Layout:
 //! - [`api`]      — the flutter_rust_bridge surface (the only thing Flutter sees)
 //! - [`audio`]    — cpal stream + the realtime callback + the `Engine` handle
-//! - [`player`]   — the realtime WAV playback source
+//! - [`strip`]    — channel strip: source → gain → pan → output, plus a meter
+//! - [`dsp`]      — built-in DSP units + the `Process` trait they compose through
+//! - [`player`]   — the realtime WAV playback source (planar render)
 //! - [`clip`]     — decoded, immutable audio shared across threads by `Arc`
 //! - [`decode`]   — symphonia WAV decode (control thread only)
 //! - [`commands`] — the lock-free control->audio command ring
@@ -18,8 +20,10 @@ mod audio;
 mod clip;
 mod commands;
 mod decode;
+mod dsp;
 mod player;
 mod scope;
+mod strip;
 
 // Kept for a future milestone (built-in synth); not currently wired into the
 // audio path, so suppress the dead-code lint on its still-unused parts.

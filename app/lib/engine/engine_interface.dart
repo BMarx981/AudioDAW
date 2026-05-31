@@ -25,6 +25,22 @@ abstract class EngineInterface {
   /// tick (the engine clamps to the clip bounds).
   void seek(double secs);
 
+  /// Turn looping on/off. When on, playback wraps to the start at the clip end
+  /// instead of stopping. Fire-and-forget.
+  void setLooping(bool looping);
+
+  /// Set the channel-strip gain in decibels. Fire-and-forget; safe on every knob
+  /// tick — the engine clamps and smooths it, so a drag is click-free.
+  void setGainDb(double db);
+
+  /// Set the channel-strip gain as a raw linear multiplier. Fire-and-forget;
+  /// clamped and smoothed by the engine. (Drives the linear gain fader.)
+  void setGainLinear(double linear);
+
+  /// Set the channel-strip pan in [-1, 1] (-1 = left, 0 = center, +1 = right).
+  /// Fire-and-forget; clamped and smoothed by the engine.
+  void setPan(double pan);
+
   /// Whether the audio engine is running (device open).
   bool get isRunning;
 
@@ -36,6 +52,11 @@ abstract class EngineInterface {
   /// A stream of transport snapshots (~30 Hz) for animating the playhead and
   /// reflecting play/stop. Subscribe once and cache it.
   Stream<PlaybackState> get playbackState;
+
+  /// A stream of post-fader peak levels (~60 Hz) for the channel-strip meter.
+  /// Subscribe once and cache it; the production implementation spawns a pump
+  /// per subscription.
+  Stream<MeterLevels> get meterLevels;
 }
 
 /// A decoded clip's metadata plus its precomputed min/max waveform summary.
@@ -69,4 +90,15 @@ class PlaybackState {
   final bool playing;
 
   static const stopped = PlaybackState(positionSecs: 0, playing: false);
+}
+
+/// Post-fader peak levels per channel, linear (0..≈1, may exceed 1 if boosted).
+/// The meter widget maps these to its own dB scale.
+class MeterLevels {
+  const MeterLevels({required this.peakLeft, required this.peakRight});
+
+  final double peakLeft;
+  final double peakRight;
+
+  static const silent = MeterLevels(peakLeft: 0, peakRight: 0);
 }

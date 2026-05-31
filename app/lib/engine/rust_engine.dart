@@ -34,6 +34,18 @@ class RustEngine implements EngineInterface {
   void seek(double secs) => rust.seek(secs: secs);
 
   @override
+  void setLooping(bool looping) => rust.setLooping(looping: looping);
+
+  @override
+  void setGainDb(double db) => rust.setGainDb(db: db);
+
+  @override
+  void setGainLinear(double linear) => rust.setGainLinear(linear: linear);
+
+  @override
+  void setPan(double pan) => rust.setPan(pan: pan);
+
+  @override
   bool get isRunning => rust.isRunning();
 
   /// Cached so repeated reads don't each spawn a Rust-side pump thread.
@@ -51,5 +63,13 @@ class RustEngine implements EngineInterface {
       .map(
         (s) => PlaybackState(positionSecs: s.positionSecs, playing: s.playing),
       )
+      .asBroadcastStream();
+
+  Stream<MeterLevels>? _meterLevels;
+
+  @override
+  Stream<MeterLevels> get meterLevels => _meterLevels ??= rust
+      .meterStream()
+      .map((m) => MeterLevels(peakLeft: m.peakLeft, peakRight: m.peakRight))
       .asBroadcastStream();
 }

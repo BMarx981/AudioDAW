@@ -32,6 +32,27 @@ void stop() => RustLib.instance.api.crateApiEngineApiStop();
 void seek({required double secs}) =>
     RustLib.instance.api.crateApiEngineApiSeek(secs: secs);
 
+/// Turn looping on/off. Fire-and-forget; when on, playback wraps to the start
+/// at the clip end instead of stopping.
+void setLooping({required bool looping}) =>
+    RustLib.instance.api.crateApiEngineApiSetLooping(looping: looping);
+
+/// Set the channel-strip gain, in decibels (UI-natural). Fire-and-forget; safe
+/// to call on every knob tick — the value is clamped and smoothed on the audio
+/// thread, so a drag produces a click-free fade.
+void setGainDb({required double db}) =>
+    RustLib.instance.api.crateApiEngineApiSetGainDb(db: db);
+
+/// Set the channel-strip gain as a raw linear multiplier (what the linear gain
+/// fader drives). Fire-and-forget; clamped and smoothed on the audio thread.
+void setGainLinear({required double linear}) =>
+    RustLib.instance.api.crateApiEngineApiSetGainLinear(linear: linear);
+
+/// Set the channel-strip pan, in `[-1, 1]` (−1 = hard left, 0 = center, +1 =
+/// hard right). Fire-and-forget; clamped and smoothed on the audio thread.
+void setPan({required double pan}) =>
+    RustLib.instance.api.crateApiEngineApiSetPan(pan: pan);
+
 /// Whether the audio engine is running (device open). Handy for the UI.
 bool isRunning() => RustLib.instance.api.crateApiEngineApiIsRunning();
 
@@ -52,6 +73,17 @@ Stream<Float32List> scopeStream() =>
 /// anyway, so it drains the retirement ring each tick.
 Stream<PlaybackStatus> playbackStatusStream() =>
     RustLib.instance.api.crateApiEngineApiPlaybackStatusStream();
+
+/// Stream of post-fader [`MeterLevels`] (~60 Hz) — the first continuous
+/// audio→UI level stream. The audio thread maintains a peak-hold-with-decay per
+/// channel and publishes it to atomics each buffer; this pump reads those
+/// atomics and hands them to Dart. Emits zeros while the engine is stopped.
+///
+/// As with the other pumps, nothing here runs on or blocks the audio thread —
+/// reading an atomic is wait-free, and the lock taken is the control-side engine
+/// mutex (never touched by the realtime callback).
+Stream<MeterLevels> meterStream() =>
+    RustLib.instance.api.crateApiEngineApiMeterStream();
 
 /// What `load_wav` hands back to Dart: enough metadata to label the clip, plus a
 /// precomputed min/max waveform summary for the display painter. Computing the
@@ -105,6 +137,27 @@ class LoadedClip {
           durationSecs == other.durationSecs &&
           waveformMin == other.waveformMin &&
           waveformMax == other.waveformMax;
+}
+
+/// Post-fader peak levels per channel, linear (0..≈1, and can exceed 1 if the
+/// gain is boosting). Streamed ~60×/sec — the first continuous audio→UI level
+/// stream. The UI maps these to its own dB-scaled meter.
+class MeterLevels {
+  final double peakLeft;
+  final double peakRight;
+
+  const MeterLevels({required this.peakLeft, required this.peakRight});
+
+  @override
+  int get hashCode => peakLeft.hashCode ^ peakRight.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MeterLevels &&
+          runtimeType == other.runtimeType &&
+          peakLeft == other.peakLeft &&
+          peakRight == other.peakRight;
 }
 
 /// A snapshot of transport state for the UI to animate the playhead and reflect

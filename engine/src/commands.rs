@@ -36,6 +36,18 @@ pub enum Command {
     /// Jump the playhead to this position, in seconds from the clip start.
     /// Clamped to the clip bounds by the player.
     Seek(f32),
+    /// Turn looping on/off. When on, the player wraps back to the start at the
+    /// clip end instead of stopping.
+    SetLooping(bool),
+    /// Set the channel-strip gain target, in decibels. Clamped and smoothed by
+    /// the [`crate::dsp::Gain`] unit.
+    SetGainDb(f32),
+    /// Set the channel-strip gain target as a raw linear multiplier. Clamped and
+    /// smoothed by the [`crate::dsp::Gain`] unit. (Used by the linear gain fader.)
+    SetGainLinear(f32),
+    /// Set the channel-strip pan target, in `[-1, 1]` (−1 = left, +1 = right).
+    /// Clamped and smoothed by the [`crate::dsp::Pan`] unit.
+    SetPan(f32),
 }
 
 /// Number of in-flight commands the ring can hold. Far more than the UI can

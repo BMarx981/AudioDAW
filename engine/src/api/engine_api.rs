@@ -27,6 +27,9 @@ use crate::frb_generated::StreamSink;
 /// playhead, which doesn't need to update faster than the eye notices.
 const SCOPE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const STATUS_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// Meters want a brisk update so transients read crisply — ~60 Hz, like the
+/// scope.
+const METER_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Number of min/max columns we summarize a clip's waveform into at load. Plenty
 /// for any realistic window width; the Flutter painter sub-samples to fit.
@@ -67,6 +70,14 @@ pub struct PlaybackStatus {
     pub position_secs: f64,
     /// Whether playback is currently advancing.
     pub playing: bool,
+}
+
+/// Post-fader peak levels per channel, linear (0..≈1, and can exceed 1 if the
+/// gain is boosting). Streamed ~60×/sec — the first continuous audio→UI level
+/// stream. The UI maps these to its own dB-scaled meter.
+pub struct MeterLevels {
+    pub peak_left: f32,
+    pub peak_right: f32,
 }
 
 /// Load and decode a WAV from disk, hand it to the audio engine, and return its
@@ -130,6 +141,35 @@ pub fn stop() {
 #[frb(sync)]
 pub fn seek(secs: f32) {
     with_engine(|e| e.seek(secs));
+}
+
+/// Turn looping on/off. Fire-and-forget; when on, playback wraps to the start
+/// at the clip end instead of stopping.
+#[frb(sync)]
+pub fn set_looping(looping: bool) {
+    with_engine(|e| e.set_looping(looping));
+}
+
+/// Set the channel-strip gain, in decibels (UI-natural). Fire-and-forget; safe
+/// to call on every knob tick — the value is clamped and smoothed on the audio
+/// thread, so a drag produces a click-free fade.
+#[frb(sync)]
+pub fn set_gain_db(db: f32) {
+    with_engine(|e| e.set_gain_db(db));
+}
+
+/// Set the channel-strip gain as a raw linear multiplier (what the linear gain
+/// fader drives). Fire-and-forget; clamped and smoothed on the audio thread.
+#[frb(sync)]
+pub fn set_gain_linear(linear: f32) {
+    with_engine(|e| e.set_gain_linear(linear));
+}
+
+/// Set the channel-strip pan, in `[-1, 1]` (−1 = hard left, 0 = center, +1 =
+/// hard right). Fire-and-forget; clamped and smoothed on the audio thread.
+#[frb(sync)]
+pub fn set_pan(pan: f32) {
+    with_engine(|e| e.set_pan(pan));
 }
 
 /// Whether the audio engine is running (device open). Handy for the UI.
@@ -232,6 +272,61 @@ pub fn playback_status_stream(sink: StreamSink<PlaybackStatus>) {
                     break;
                 }
                 std::thread::sleep(STATUS_FRAME_INTERVAL);
+            }
+        });
+}
+
+/// Stream of post-fader [`MeterLevels`] (~60 Hz) — the first continuous
+/// audio→UI level stream. The audio thread maintains a peak-hold-with-decay per
+/// channel and publishes it to atomics each buffer; this pump reads those
+/// atomics and hands them to Dart. Emits zeros while the engine is stopped.
+///
+/// As with the other pumps, nothing here runs on or blocks the audio thread —
+/// reading an atomic is wait-free, and the lock taken is the control-side engine
+/// mutex (never touched by the realtime callback).
+pub fn meter_stream(sink: StreamSink<MeterLevels>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static PUMP_RUNNING: AtomicBool = AtomicBool::new(false);
+    if PUMP_RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("daw-meter-pump".into())
+        .spawn(move || {
+            struct Guard;
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    PUMP_RUNNING.store(false, Ordering::Release);
+                }
+            }
+            let _guard = Guard;
+
+            loop {
+                let levels = match ENGINE.lock() {
+                    Ok(guard) => match guard.as_ref() {
+                        Some(engine) => {
+                            let (l, r) = engine.peak_levels();
+                            MeterLevels {
+                                peak_left: l,
+                                peak_right: r,
+                            }
+                        }
+                        None => MeterLevels {
+                            peak_left: 0.0,
+                            peak_right: 0.0,
+                        },
+                    },
+                    Err(_) => MeterLevels {
+                        peak_left: 0.0,
+                        peak_right: 0.0,
+                    },
+                };
+                if sink.add(levels).is_err() {
+                    break;
+                }
+                std::thread::sleep(METER_FRAME_INTERVAL);
             }
         });
 }

@@ -12,6 +12,10 @@ class FakeEngine implements EngineInterface {
   int pauseCount = 0;
   int stopCount = 0;
   final List<double> seeks = [];
+  final List<bool> loopings = [];
+  final List<double> gainDbs = [];
+  final List<double> gainLinears = [];
+  final List<double> pans = [];
   bool _running = false;
 
   /// If set, [loadWav] throws this — used to test the error path.
@@ -49,6 +53,18 @@ class FakeEngine implements EngineInterface {
   void seek(double secs) => seeks.add(secs);
 
   @override
+  void setLooping(bool looping) => loopings.add(looping);
+
+  @override
+  void setGainDb(double db) => gainDbs.add(db);
+
+  @override
+  void setGainLinear(double linear) => gainLinears.add(linear);
+
+  @override
+  void setPan(double pan) => pans.add(pan);
+
+  @override
   bool get isRunning => _running;
 
   /// Streams are driven manually in tests via [emitScopeFrame] /
@@ -58,6 +74,8 @@ class FakeEngine implements EngineInterface {
       StreamController<Float32List>.broadcast();
   final StreamController<PlaybackState> _playback =
       StreamController<PlaybackState>.broadcast();
+  final StreamController<MeterLevels> _meter =
+      StreamController<MeterLevels>.broadcast();
 
   @override
   Stream<Float32List> get scopeFrames => _scope.stream;
@@ -65,8 +83,12 @@ class FakeEngine implements EngineInterface {
   @override
   Stream<PlaybackState> get playbackState => _playback.stream;
 
+  @override
+  Stream<MeterLevels> get meterLevels => _meter.stream;
+
   void emitScopeFrame(Float32List frame) => _scope.add(frame);
   void emitPlaybackState(PlaybackState state) => _playback.add(state);
+  void emitMeterLevels(MeterLevels levels) => _meter.add(levels);
 
   /// The most recent path passed to [loadWav], or null if none.
   String? get lastLoadedPath => loadedPaths.isEmpty ? null : loadedPaths.last;
@@ -74,5 +96,6 @@ class FakeEngine implements EngineInterface {
   void dispose() {
     _scope.close();
     _playback.close();
+    _meter.close();
   }
 }
