@@ -51,6 +51,9 @@ class ChannelStrip extends StatelessWidget {
     required this.gainMode,
     required this.pan,
     required this.meter,
+    this.title = 'Channel',
+    this.selected = false,
+    this.onTap,
     this.onGainLinearChanged,
     this.onGainModeChanged,
     this.onPanChanged,
@@ -64,6 +67,18 @@ class ChannelStrip extends StatelessWidget {
 
   final double pan;
   final Stream<MeterLevels> meter;
+
+  /// Header label — "Track 1", "Master", etc.
+  final String title;
+
+  /// When true, the strip is drawn with a highlighted border so the EQ panel
+  /// below makes it obvious which strip it's editing.
+  final bool selected;
+
+  /// Tapping the strip body fires this — used by the parent to switch the EQ
+  /// panel's focus between tracks.
+  final VoidCallback? onTap;
+
   final ValueChanged<double>? onGainLinearChanged;
   final ValueChanged<GainFaderMode>? onGainModeChanged;
   final ValueChanged<double>? onPanChanged;
@@ -71,16 +86,19 @@ class ChannelStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Container(
+    final body = Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
         color: const Color(0xFF15151B),
         borderRadius: BorderRadius.circular(12),
+        border: selected
+            ? Border.all(color: theme.colorScheme.primary, width: 2)
+            : Border.all(color: Colors.transparent, width: 2),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('Channel', style: theme.textTheme.labelMedium),
+          Text(title, style: theme.textTheme.labelMedium),
           const SizedBox(height: 12),
 
           // Selector: which fader representation is live.
@@ -134,6 +152,18 @@ class ChannelStrip extends StatelessWidget {
           ),
           Text(_fmtPan(pan), style: theme.textTheme.bodySmall),
         ],
+      ),
+    );
+    if (onTap == null) return body;
+    // The InkWell catches taps on the strip's whole footprint so the EQ panel
+    // below can switch its focus track. We feed it a transparent material so
+    // the splash renders on top of the body's dark background.
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: body,
       ),
     );
   }

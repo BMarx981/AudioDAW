@@ -6,56 +6,75 @@ import 'dart:typed_data';
 /// this interface and on the plain value types below ([ClipInfo],
 /// [PlaybackState]), never on generated bridge classes. Production wires in
 /// [RustEngine]; widget tests wire in a `FakeEngine` that returns scripted data.
+///
+/// ## Multitrack (Milestone 4)
+///
+/// Parameter setters now take a `track` index, and there are matching `master*`
+/// setters for the master bus. Transport (`play`/`pause`/`stop`/`seek`) is
+/// global — one playhead advances every track. The meter stream is a single
+/// [MixerMeters] event per tick carrying the per-track peaks and the master
+/// bus peak together, so the UI drives all the meters from one subscription.
 abstract class EngineInterface {
-  /// Decode a WAV at [path], hand it to the engine (starting the audio device if
-  /// needed), and return its metadata + waveform summary. The clip loads stopped
-  /// at the start — call [play] to hear it. Throws if the file can't be decoded.
-  Future<ClipInfo> loadWav(String path);
+  /// The track-pool capacity exposed by the engine. UI state arrays are sized
+  /// to this; only the first two slots are user-visible in Milestone 4.
+  int get maxTracks;
 
-  /// Begin or resume playback. Fire-and-forget; no-op if nothing is loaded.
+  /// Decode a WAV at [path], hand it to [track] in the engine (starting the
+  /// audio device if needed), and return its metadata + waveform summary. The
+  /// clip loads stopped at the start — call [play] to hear it. Throws if the
+  /// file can't be decoded.
+  Future<ClipInfo> loadWav(int track, String path);
+
+  /// Begin or resume playback on every track. Fire-and-forget; no-op if no clip
+  /// is loaded.
   void play();
 
-  /// Pause, holding the current position. Fire-and-forget.
+  /// Pause every track, holding the current position. Fire-and-forget.
   void pause();
 
-  /// Stop and rewind to the start. Fire-and-forget.
+  /// Stop every track and rewind to the start. Fire-and-forget.
   void stop();
 
-  /// Seek to [secs] from the clip start. Fire-and-forget; safe on every scrub
-  /// tick (the engine clamps to the clip bounds).
+  /// Seek every track to [secs] from its clip start. Fire-and-forget; safe on
+  /// every scrub tick (the engine clamps to the clip bounds).
   void seek(double secs);
 
-  /// Turn looping on/off. When on, playback wraps to the start at the clip end
-  /// instead of stopping. Fire-and-forget.
+  /// Turn looping on/off on every track. When on, playback wraps to the start
+  /// at the clip end instead of stopping. Fire-and-forget.
   void setLooping(bool looping);
 
-  /// Set the channel-strip gain in decibels. Fire-and-forget; safe on every knob
-  /// tick — the engine clamps and smooths it, so a drag is click-free.
-  void setGainDb(double db);
+  /// Set [track]'s gain in decibels. Fire-and-forget; safe on every knob tick.
+  void setTrackGainDb(int track, double db);
 
-  /// Set the channel-strip gain as a raw linear multiplier. Fire-and-forget;
-  /// clamped and smoothed by the engine. (Drives the linear gain fader.)
-  void setGainLinear(double linear);
+  /// Set [track]'s gain as a raw linear multiplier. Fire-and-forget.
+  void setTrackGainLinear(int track, double linear);
 
-  /// Set the channel-strip pan in [-1, 1] (-1 = left, 0 = center, +1 = right).
-  /// Fire-and-forget; clamped and smoothed by the engine.
-  void setPan(double pan);
+  /// Set [track]'s pan in [-1, 1]. Fire-and-forget.
+  void setTrackPan(int track, double pan);
 
-  /// Set EQ band [band]'s filter kind. Fire-and-forget.
-  void setEqBandKind(int band, EqFilterKind kind);
+  /// Set [track]'s EQ band filter kind. Fire-and-forget.
+  void setTrackEqBandKind(int track, int band, EqFilterKind kind);
 
-  /// Set EQ band [band]'s center/corner frequency in Hz. Fire-and-forget; safe
-  /// on every knob tick — smoothed by the engine, so a sweep is click-free.
-  void setEqBandFreq(int band, double hz);
+  /// Set [track]'s EQ band frequency in Hz. Fire-and-forget; smoothed.
+  void setTrackEqBandFreq(int track, int band, double hz);
 
-  /// Set EQ band [band]'s Q (bandwidth). Fire-and-forget; smoothed.
-  void setEqBandQ(int band, double q);
+  /// Set [track]'s EQ band Q. Fire-and-forget; smoothed.
+  void setTrackEqBandQ(int track, int band, double q);
 
-  /// Set EQ band [band]'s gain in dB (peak/shelf kinds). Fire-and-forget; smoothed.
-  void setEqBandGainDb(int band, double db);
+  /// Set [track]'s EQ band gain in dB. Fire-and-forget; smoothed.
+  void setTrackEqBandGainDb(int track, int band, double db);
 
-  /// Enable/disable EQ band [band] (true bypass when off). Fire-and-forget.
-  void setEqBandEnabled(int band, bool on);
+  /// Enable/disable [track]'s EQ band. Fire-and-forget.
+  void setTrackEqBandEnabled(int track, int band, bool on);
+
+  /// Set the master bus gain in dB. Fire-and-forget.
+  void setMasterGainDb(double db);
+
+  /// Set the master bus gain as a raw linear multiplier. Fire-and-forget.
+  void setMasterGainLinear(double linear);
+
+  /// Set the master bus pan in [-1, 1]. Fire-and-forget.
+  void setMasterPan(double pan);
 
   /// The engine's output sample rate (Hz). The EQ response curve is drawn at
   /// this rate so it matches what the audio thread actually filters with.
@@ -64,19 +83,19 @@ abstract class EngineInterface {
   /// Whether the audio engine is running (device open).
   bool get isRunning;
 
-  /// A stream of oscilloscope frames — one trigger-aligned window of mono samples
-  /// in [-1, 1] per event, the live output of the player. Subscribe once and
-  /// cache it; the production implementation spawns a pump per subscription.
+  /// A stream of oscilloscope frames — one trigger-aligned window of mono
+  /// samples in [-1, 1] per event, the live output of the master mix. Subscribe
+  /// once and cache it; the production implementation spawns a pump per
+  /// subscription.
   Stream<Float32List> get scopeFrames;
 
   /// A stream of transport snapshots (~30 Hz) for animating the playhead and
   /// reflecting play/stop. Subscribe once and cache it.
   Stream<PlaybackState> get playbackState;
 
-  /// A stream of post-fader peak levels (~60 Hz) for the channel-strip meter.
-  /// Subscribe once and cache it; the production implementation spawns a pump
-  /// per subscription.
-  Stream<MeterLevels> get meterLevels;
+  /// A stream of post-fader peak levels (~60 Hz) for every track plus the
+  /// master bus. Subscribe once and cache it.
+  Stream<MixerMeters> get mixerMeters;
 }
 
 /// A decoded clip's metadata plus its precomputed min/max waveform summary.
@@ -140,8 +159,10 @@ enum EqFilterKind {
       this == EqFilterKind.highShelf;
 }
 
-/// Post-fader peak levels per channel, linear (0..≈1, may exceed 1 if boosted).
-/// The meter widget maps these to its own dB scale.
+/// Post-fader peak levels for one channel strip, linear (0..≈1, may exceed 1 if
+/// boosted). The meter widget maps these to its own dB scale. Kept as a
+/// separate type from [MixerMeters] so the dumb channel-strip widget can be
+/// driven by a single track's stream without knowing about the mixer shape.
 class MeterLevels {
   const MeterLevels({required this.peakLeft, required this.peakRight});
 
@@ -149,4 +170,43 @@ class MeterLevels {
   final double peakRight;
 
   static const silent = MeterLevels(peakLeft: 0, peakRight: 0);
+}
+
+/// A snapshot of every meter the mixer publishes: per-track L/R peaks (one
+/// entry per strip slot) plus the master bus L/R peak. Subscribe once; the UI
+/// fans the data out to per-strip meters by deriving a [MeterLevels] view.
+class MixerMeters {
+  const MixerMeters({
+    required this.trackPeaksL,
+    required this.trackPeaksR,
+    required this.masterPeakL,
+    required this.masterPeakR,
+  });
+
+  final List<double> trackPeaksL;
+  final List<double> trackPeaksR;
+  final double masterPeakL;
+  final double masterPeakR;
+
+  /// The L/R peak for [track] as a [MeterLevels], or silence if out of range.
+  MeterLevels trackLevels(int track) {
+    if (track < 0 || track >= trackPeaksL.length || track >= trackPeaksR.length) {
+      return MeterLevels.silent;
+    }
+    return MeterLevels(
+      peakLeft: trackPeaksL[track],
+      peakRight: trackPeaksR[track],
+    );
+  }
+
+  /// The master L/R peak as a [MeterLevels].
+  MeterLevels get masterLevels =>
+      MeterLevels(peakLeft: masterPeakL, peakRight: masterPeakR);
+
+  static final silent = MixerMeters(
+    trackPeaksL: const [],
+    trackPeaksR: const [],
+    masterPeakL: 0,
+    masterPeakR: 0,
+  );
 }

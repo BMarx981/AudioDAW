@@ -9,8 +9,11 @@ import 'engine_interface.dart';
 /// [engine_interface.dart] so the UI and tests never depend on generated code.
 class RustEngine implements EngineInterface {
   @override
-  Future<ClipInfo> loadWav(String path) async {
-    final c = await rust.loadWav(path: path);
+  late final int maxTracks = rust.maxTracks();
+
+  @override
+  Future<ClipInfo> loadWav(int track, String path) async {
+    final c = await rust.loadWav(track: track, path: path);
     return ClipInfo(
       sampleRate: c.sampleRate,
       channels: c.channels,
@@ -37,32 +40,46 @@ class RustEngine implements EngineInterface {
   void setLooping(bool looping) => rust.setLooping(looping: looping);
 
   @override
-  void setGainDb(double db) => rust.setGainDb(db: db);
+  void setTrackGainDb(int track, double db) =>
+      rust.setTrackGainDb(track: track, db: db);
 
   @override
-  void setGainLinear(double linear) => rust.setGainLinear(linear: linear);
+  void setTrackGainLinear(int track, double linear) =>
+      rust.setTrackGainLinear(track: track, linear: linear);
 
   @override
-  void setPan(double pan) => rust.setPan(pan: pan);
+  void setTrackPan(int track, double pan) =>
+      rust.setTrackPan(track: track, pan: pan);
 
   @override
-  void setEqBandKind(int band, EqFilterKind kind) =>
-      rust.setEqBandKind(band: band, kind: kind.code);
+  void setTrackEqBandKind(int track, int band, EqFilterKind kind) =>
+      rust.setTrackEqBandKind(track: track, band: band, kind: kind.code);
 
   @override
-  void setEqBandFreq(int band, double hz) =>
-      rust.setEqBandFreq(band: band, hz: hz);
+  void setTrackEqBandFreq(int track, int band, double hz) =>
+      rust.setTrackEqBandFreq(track: track, band: band, hz: hz);
 
   @override
-  void setEqBandQ(int band, double q) => rust.setEqBandQ(band: band, q: q);
+  void setTrackEqBandQ(int track, int band, double q) =>
+      rust.setTrackEqBandQ(track: track, band: band, q: q);
 
   @override
-  void setEqBandGainDb(int band, double db) =>
-      rust.setEqBandGainDb(band: band, db: db);
+  void setTrackEqBandGainDb(int track, int band, double db) =>
+      rust.setTrackEqBandGainDb(track: track, band: band, db: db);
 
   @override
-  void setEqBandEnabled(int band, bool on) =>
-      rust.setEqBandEnabled(band: band, on_: on);
+  void setTrackEqBandEnabled(int track, int band, bool on) =>
+      rust.setTrackEqBandEnabled(track: track, band: band, on_: on);
+
+  @override
+  void setMasterGainDb(double db) => rust.setMasterGainDb(db: db);
+
+  @override
+  void setMasterGainLinear(double linear) =>
+      rust.setMasterGainLinear(linear: linear);
+
+  @override
+  void setMasterPan(double pan) => rust.setMasterPan(pan: pan);
 
   @override
   double get engineSampleRate => rust.engineSampleRate();
@@ -87,11 +104,18 @@ class RustEngine implements EngineInterface {
       )
       .asBroadcastStream();
 
-  Stream<MeterLevels>? _meterLevels;
+  Stream<MixerMeters>? _mixerMeters;
 
   @override
-  Stream<MeterLevels> get meterLevels => _meterLevels ??= rust
+  Stream<MixerMeters> get mixerMeters => _mixerMeters ??= rust
       .meterStream()
-      .map((m) => MeterLevels(peakLeft: m.peakLeft, peakRight: m.peakRight))
+      .map(
+        (m) => MixerMeters(
+          trackPeaksL: List<double>.from(m.trackPeaksL),
+          trackPeaksR: List<double>.from(m.trackPeaksR),
+          masterPeakL: m.masterPeakL,
+          masterPeakR: m.masterPeakR,
+        ),
+      )
       .asBroadcastStream();
 }

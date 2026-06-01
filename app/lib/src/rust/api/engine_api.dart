@@ -8,81 +8,117 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `lock`, `with_engine`
 
-/// Load and decode a WAV from disk, hand it to the audio engine, and return its
-/// metadata + waveform summary. Starts the engine (opens the audio device) if it
-/// isn't already running. The clip is loaded stopped at the start — call
-/// [`play`] to hear it.
+/// The mixer's track-pool size. Exposed so the Dart side can size per-track
+/// state arrays without hard-coding the constant in two places.
+int maxTracks() => RustLib.instance.api.crateApiEngineApiMaxTracks();
+
+/// Load and decode a WAV from disk, hand it to `track` in the audio engine, and
+/// return its metadata + waveform summary. Starts the engine (opens the audio
+/// device) if it isn't already running. The clip loads stopped at the start —
+/// call [`play`] to hear it.
 ///
 /// Async on the Dart side (it does real file I/O and decoding); throws a Dart
 /// exception if the file can't be read or decoded.
-Future<LoadedClip> loadWav({required String path}) =>
-    RustLib.instance.api.crateApiEngineApiLoadWav(path: path);
+Future<LoadedClip> loadWav({required int track, required String path}) =>
+    RustLib.instance.api.crateApiEngineApiLoadWav(track: track, path: path);
 
-/// Begin or resume playback. Fire-and-forget; no-op if no clip is loaded.
+/// Begin or resume playback on every track. Fire-and-forget.
 void play() => RustLib.instance.api.crateApiEngineApiPlay();
 
-/// Pause playback, holding the current position. Fire-and-forget.
+/// Pause playback, holding the current position, on every track. Fire-and-forget.
 void pause() => RustLib.instance.api.crateApiEngineApiPause();
 
-/// Stop playback and rewind to the start. Fire-and-forget.
+/// Stop playback and rewind every track to the start. Fire-and-forget.
 void stop() => RustLib.instance.api.crateApiEngineApiStop();
 
-/// Seek to `secs` from the clip start. Fire-and-forget; safe to call on every
-/// scrub tick (the engine clamps to the clip bounds).
+/// Seek every track to `secs` from its clip start. Fire-and-forget.
 void seek({required double secs}) =>
     RustLib.instance.api.crateApiEngineApiSeek(secs: secs);
 
-/// Turn looping on/off. Fire-and-forget; when on, playback wraps to the start
-/// at the clip end instead of stopping.
+/// Turn looping on/off on every track. Fire-and-forget.
 void setLooping({required bool looping}) =>
     RustLib.instance.api.crateApiEngineApiSetLooping(looping: looping);
 
-/// Set the channel-strip gain, in decibels (UI-natural). Fire-and-forget; safe
-/// to call on every knob tick — the value is clamped and smoothed on the audio
-/// thread, so a drag produces a click-free fade.
-void setGainDb({required double db}) =>
-    RustLib.instance.api.crateApiEngineApiSetGainDb(db: db);
+/// Set track `t`'s gain in dB. Fire-and-forget; clamped + smoothed on audio.
+void setTrackGainDb({required int track, required double db}) =>
+    RustLib.instance.api.crateApiEngineApiSetTrackGainDb(track: track, db: db);
 
-/// Set the channel-strip gain as a raw linear multiplier (what the linear gain
-/// fader drives). Fire-and-forget; clamped and smoothed on the audio thread.
-void setGainLinear({required double linear}) =>
-    RustLib.instance.api.crateApiEngineApiSetGainLinear(linear: linear);
-
-/// Set the channel-strip pan, in `[-1, 1]` (−1 = hard left, 0 = center, +1 =
-/// hard right). Fire-and-forget; clamped and smoothed on the audio thread.
-void setPan({required double pan}) =>
-    RustLib.instance.api.crateApiEngineApiSetPan(pan: pan);
-
-/// Set EQ band `n`'s filter kind, by integer code (0=peak, 1=low-shelf,
-/// 2=high-shelf, 3=low-pass, 4=high-pass, 5=band-pass, 6=notch). We pass the kind
-/// as a small int rather than mirroring the engine's `FilterKind` enum across the
-/// bridge: that enum lives in `dsp::biquad` next to types (`Biquad`, `Eq`) that
-/// carry fixed-size arrays flutter_rust_bridge can't parse, so naming the enum
-/// anywhere the bridge scans drags those in and breaks codegen. The int→kind
-/// mapping happens inside the engine, which the bridge never scans.
-/// Fire-and-forget.
-void setEqBandKind({required int band, required int kind}) =>
-    RustLib.instance.api.crateApiEngineApiSetEqBandKind(band: band, kind: kind);
-
-/// Set EQ band `n`'s center/corner frequency in Hz. Fire-and-forget; safe on
-/// every knob tick — the value is smoothed on the audio thread, so a sweep is
-/// click-free.
-void setEqBandFreq({required int band, required double hz}) =>
-    RustLib.instance.api.crateApiEngineApiSetEqBandFreq(band: band, hz: hz);
-
-/// Set EQ band `n`'s Q (bandwidth). Fire-and-forget; smoothed on the audio thread.
-void setEqBandQ({required int band, required double q}) =>
-    RustLib.instance.api.crateApiEngineApiSetEqBandQ(band: band, q: q);
-
-/// Set EQ band `n`'s gain in dB (peak/shelf kinds). Fire-and-forget; smoothed.
-void setEqBandGainDb({required int band, required double db}) =>
-    RustLib.instance.api.crateApiEngineApiSetEqBandGainDb(band: band, db: db);
-
-/// Enable/disable EQ band `n` (true bypass when off). Fire-and-forget.
-void setEqBandEnabled({required int band, required bool on_}) => RustLib
+/// Set track `t`'s gain as a raw linear multiplier. Fire-and-forget; clamped + smoothed.
+void setTrackGainLinear({required int track, required double linear}) => RustLib
     .instance
     .api
-    .crateApiEngineApiSetEqBandEnabled(band: band, on_: on_);
+    .crateApiEngineApiSetTrackGainLinear(track: track, linear: linear);
+
+/// Set track `t`'s pan in `[-1, 1]`. Fire-and-forget; clamped + smoothed.
+void setTrackPan({required int track, required double pan}) =>
+    RustLib.instance.api.crateApiEngineApiSetTrackPan(track: track, pan: pan);
+
+/// Set track `t`'s EQ band filter kind, by integer code. Fire-and-forget.
+void setTrackEqBandKind({
+  required int track,
+  required int band,
+  required int kind,
+}) => RustLib.instance.api.crateApiEngineApiSetTrackEqBandKind(
+  track: track,
+  band: band,
+  kind: kind,
+);
+
+/// Set track `t`'s EQ band frequency in Hz. Fire-and-forget; smoothed.
+void setTrackEqBandFreq({
+  required int track,
+  required int band,
+  required double hz,
+}) => RustLib.instance.api.crateApiEngineApiSetTrackEqBandFreq(
+  track: track,
+  band: band,
+  hz: hz,
+);
+
+/// Set track `t`'s EQ band Q. Fire-and-forget; smoothed.
+void setTrackEqBandQ({
+  required int track,
+  required int band,
+  required double q,
+}) => RustLib.instance.api.crateApiEngineApiSetTrackEqBandQ(
+  track: track,
+  band: band,
+  q: q,
+);
+
+/// Set track `t`'s EQ band gain in dB. Fire-and-forget; smoothed.
+void setTrackEqBandGainDb({
+  required int track,
+  required int band,
+  required double db,
+}) => RustLib.instance.api.crateApiEngineApiSetTrackEqBandGainDb(
+  track: track,
+  band: band,
+  db: db,
+);
+
+/// Enable/disable track `t`'s EQ band. Fire-and-forget.
+void setTrackEqBandEnabled({
+  required int track,
+  required int band,
+  required bool on_,
+}) => RustLib.instance.api.crateApiEngineApiSetTrackEqBandEnabled(
+  track: track,
+  band: band,
+  on_: on_,
+);
+
+/// Set the master bus gain in dB. Fire-and-forget; clamped + smoothed.
+void setMasterGainDb({required double db}) =>
+    RustLib.instance.api.crateApiEngineApiSetMasterGainDb(db: db);
+
+/// Set the master bus gain as a raw linear multiplier. Fire-and-forget.
+void setMasterGainLinear({required double linear}) =>
+    RustLib.instance.api.crateApiEngineApiSetMasterGainLinear(linear: linear);
+
+/// Set the master bus pan in `[-1, 1]`. Fire-and-forget; clamped + smoothed.
+void setMasterPan({required double pan}) =>
+    RustLib.instance.api.crateApiEngineApiSetMasterPan(pan: pan);
 
 /// The output sample rate (Hz) the engine is running at, or 48000 if it hasn't
 /// started yet. The UI draws the EQ response curve at this rate so it matches
@@ -95,7 +131,7 @@ bool isRunning() => RustLib.instance.api.crateApiEngineApiIsRunning();
 
 /// Stream of oscilloscope frames for the UI to draw. Each item is one
 /// trigger-aligned window of mono samples (`Float32List` in Dart) — now the live
-/// output of the WAV player. Subscribe once; the stream stays live for the app's
+/// output of the master mix. Subscribe once; the stream stays live for the app's
 /// lifetime, emitting an empty frame while stopped and real audio while playing.
 ///
 /// The audio callback only ever *pushes* samples into a lock-free ring; this
@@ -111,15 +147,14 @@ Stream<Float32List> scopeStream() =>
 Stream<PlaybackStatus> playbackStatusStream() =>
     RustLib.instance.api.crateApiEngineApiPlaybackStatusStream();
 
-/// Stream of post-fader [`MeterLevels`] (~60 Hz) — the first continuous
-/// audio→UI level stream. The audio thread maintains a peak-hold-with-decay per
-/// channel and publishes it to atomics each buffer; this pump reads those
-/// atomics and hands them to Dart. Emits zeros while the engine is stopped.
+/// Stream of post-fader [`MixerMeters`] (~60 Hz). Each event carries the peak
+/// L/R for every track in the pool plus the master bus, so the UI can drive a
+/// per-strip meter from one subscription.
 ///
 /// As with the other pumps, nothing here runs on or blocks the audio thread —
 /// reading an atomic is wait-free, and the lock taken is the control-side engine
 /// mutex (never touched by the realtime callback).
-Stream<MeterLevels> meterStream() =>
+Stream<MixerMeters> meterStream() =>
     RustLib.instance.api.crateApiEngineApiMeterStream();
 
 /// What `load_wav` hands back to Dart: enough metadata to label the clip, plus a
@@ -176,29 +211,51 @@ class LoadedClip {
           waveformMax == other.waveformMax;
 }
 
-/// Post-fader peak levels per channel, linear (0..≈1, and can exceed 1 if the
-/// gain is boosting). Streamed ~60×/sec — the first continuous audio→UI level
-/// stream. The UI maps these to its own dB-scaled meter.
-class MeterLevels {
-  final double peakLeft;
-  final double peakRight;
+/// One snapshot of every meter in the mixer: per-track L/R post-fader peaks
+/// (length [`max_tracks`]), plus the master bus L/R post-fader peak. All values
+/// are linear amplitude (0..≈1, may exceed 1 if boosted). The UI maps these to
+/// its own dB-scaled meter widgets.
+class MixerMeters {
+  /// Per-track left-channel peaks, one entry per strip slot.
+  final Float32List trackPeaksL;
 
-  const MeterLevels({required this.peakLeft, required this.peakRight});
+  /// Per-track right-channel peaks, same length as [`track_peaks_l`].
+  final Float32List trackPeaksR;
+
+  /// Master bus left-channel peak.
+  final double masterPeakL;
+
+  /// Master bus right-channel peak.
+  final double masterPeakR;
+
+  const MixerMeters({
+    required this.trackPeaksL,
+    required this.trackPeaksR,
+    required this.masterPeakL,
+    required this.masterPeakR,
+  });
 
   @override
-  int get hashCode => peakLeft.hashCode ^ peakRight.hashCode;
+  int get hashCode =>
+      trackPeaksL.hashCode ^
+      trackPeaksR.hashCode ^
+      masterPeakL.hashCode ^
+      masterPeakR.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is MeterLevels &&
+      other is MixerMeters &&
           runtimeType == other.runtimeType &&
-          peakLeft == other.peakLeft &&
-          peakRight == other.peakRight;
+          trackPeaksL == other.trackPeaksL &&
+          trackPeaksR == other.trackPeaksR &&
+          masterPeakL == other.masterPeakL &&
+          masterPeakR == other.masterPeakR;
 }
 
 /// A snapshot of transport state for the UI to animate the playhead and reflect
-/// play/stop. Streamed ~30×/sec.
+/// play/stop. Transport is global — one playhead drives every track. Streamed
+/// ~30×/sec.
 class PlaybackStatus {
   /// Current playhead position, seconds from the clip start.
   final double positionSecs;

@@ -38,8 +38,9 @@ void main() {
 
     expect(engine.isRunning, isFalse);
 
-    // Open the file: decodes in Rust and starts the audio device.
-    await tester.tap(find.text('Open WAV…'));
+    // Open the file: decodes in Rust and starts the audio device. Two "Open
+    // WAV…" buttons exist (one per track row); load into Track 1 (the first).
+    await tester.tap(find.text('Open WAV…').first);
     await tester.pumpAndSettle();
     expect(
       engine.isRunning,
@@ -48,9 +49,11 @@ void main() {
     );
 
     // Start watching the meter before playback so we catch the levels rising.
+    // We watch the master meter — every track flows into the master, so a
+    // non-silent master peak is the right end-to-end "audio is moving" signal.
     var maxPeak = 0.0;
-    final meterSub = engine.meterLevels.listen((m) {
-      maxPeak = math.max(maxPeak, math.max(m.peakLeft, m.peakRight));
+    final meterSub = engine.mixerMeters.listen((m) {
+      maxPeak = math.max(maxPeak, math.max(m.masterPeakL, m.masterPeakR));
     });
     addTearDown(meterSub.cancel);
 
@@ -59,7 +62,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 150));
     expect(find.text('Pause'), findsOneWidget);
 
-    // The 440 Hz tone should drive the post-fader meter above silence. Pump in
+    // The 440 Hz tone should drive the post-master meter above silence. Pump in
     // short slices so the ~60 Hz meter pump delivers a few frames to Dart.
     for (var i = 0; i < 20 && maxPeak <= 0.01; i++) {
       await tester.pump(const Duration(milliseconds: 50));
@@ -67,7 +70,7 @@ void main() {
     expect(
       maxPeak,
       greaterThan(0.01),
-      reason: 'playing audio should drive the post-fader meter',
+      reason: 'playing audio should drive the master meter',
     );
 
     await tester.tap(find.text('Stop'));

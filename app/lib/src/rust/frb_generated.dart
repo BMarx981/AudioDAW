@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -1894306845;
+  int get rustContentHash => 1113595894;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -84,9 +84,14 @@ abstract class RustLibApi extends BaseApi {
 
   bool crateApiEngineApiIsRunning();
 
-  Future<LoadedClip> crateApiEngineApiLoadWav({required String path});
+  Future<LoadedClip> crateApiEngineApiLoadWav({
+    required int track,
+    required String path,
+  });
 
-  Stream<MeterLevels> crateApiEngineApiMeterStream();
+  int crateApiEngineApiMaxTracks();
+
+  Stream<MixerMeters> crateApiEngineApiMeterStream();
 
   void crateApiEngineApiPause();
 
@@ -98,29 +103,55 @@ abstract class RustLibApi extends BaseApi {
 
   void crateApiEngineApiSeek({required double secs});
 
-  void crateApiEngineApiSetEqBandEnabled({
+  void crateApiEngineApiSetLooping({required bool looping});
+
+  void crateApiEngineApiSetMasterGainDb({required double db});
+
+  void crateApiEngineApiSetMasterGainLinear({required double linear});
+
+  void crateApiEngineApiSetMasterPan({required double pan});
+
+  void crateApiEngineApiSetTrackEqBandEnabled({
+    required int track,
     required int band,
     required bool on_,
   });
 
-  void crateApiEngineApiSetEqBandFreq({required int band, required double hz});
+  void crateApiEngineApiSetTrackEqBandFreq({
+    required int track,
+    required int band,
+    required double hz,
+  });
 
-  void crateApiEngineApiSetEqBandGainDb({
+  void crateApiEngineApiSetTrackEqBandGainDb({
+    required int track,
     required int band,
     required double db,
   });
 
-  void crateApiEngineApiSetEqBandKind({required int band, required int kind});
+  void crateApiEngineApiSetTrackEqBandKind({
+    required int track,
+    required int band,
+    required int kind,
+  });
 
-  void crateApiEngineApiSetEqBandQ({required int band, required double q});
+  void crateApiEngineApiSetTrackEqBandQ({
+    required int track,
+    required int band,
+    required double q,
+  });
 
-  void crateApiEngineApiSetGainDb({required double db});
+  void crateApiEngineApiSetTrackGainDb({
+    required int track,
+    required double db,
+  });
 
-  void crateApiEngineApiSetGainLinear({required double linear});
+  void crateApiEngineApiSetTrackGainLinear({
+    required int track,
+    required double linear,
+  });
 
-  void crateApiEngineApiSetLooping({required bool looping});
-
-  void crateApiEngineApiSetPan({required double pan});
+  void crateApiEngineApiSetTrackPan({required int track, required double pan});
 
   void crateApiEngineApiStop();
 }
@@ -205,11 +236,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "is_running", argNames: []);
 
   @override
-  Future<LoadedClip> crateApiEngineApiLoadWav({required String path}) {
+  Future<LoadedClip> crateApiEngineApiLoadWav({
+    required int track,
+    required String path,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
           sse_encode_String(path, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -223,28 +258,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiEngineApiLoadWavConstMeta,
-        argValues: [path],
+        argValues: [track, path],
         apiImpl: this,
       ),
     );
   }
 
   TaskConstMeta get kCrateApiEngineApiLoadWavConstMeta =>
-      const TaskConstMeta(debugName: "load_wav", argNames: ["path"]);
+      const TaskConstMeta(debugName: "load_wav", argNames: ["track", "path"]);
 
   @override
-  Stream<MeterLevels> crateApiEngineApiMeterStream() {
-    final sink = RustStreamSink<MeterLevels>();
+  int crateApiEngineApiMaxTracks() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_32,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiMaxTracksConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiMaxTracksConstMeta =>
+      const TaskConstMeta(debugName: "max_tracks", argNames: []);
+
+  @override
+  Stream<MixerMeters> crateApiEngineApiMeterStream() {
+    final sink = RustStreamSink<MixerMeters>();
     unawaited(
       handler.executeNormal(
         NormalTask(
           callFfi: (port_) {
             final serializer = SseSerializer(generalizedFrbRustBinding);
-            sse_encode_StreamSink_meter_levels_Sse(sink, serializer);
+            sse_encode_StreamSink_mixer_meters_Sse(sink, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 5,
+              funcId: 6,
               port: port_,
             );
           },
@@ -270,7 +327,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -292,7 +349,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -320,7 +377,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 8,
+              funcId: 9,
               port: port_,
             );
           },
@@ -355,7 +412,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 9,
+              funcId: 10,
               port: port_,
             );
           },
@@ -382,7 +439,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_f_32(secs, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -399,197 +456,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "seek", argNames: ["secs"]);
 
   @override
-  void crateApiEngineApiSetEqBandEnabled({
-    required int band,
-    required bool on_,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_u_32(band, serializer);
-          sse_encode_bool(on_, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiEngineApiSetEqBandEnabledConstMeta,
-        argValues: [band, on_],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiEngineApiSetEqBandEnabledConstMeta =>
-      const TaskConstMeta(
-        debugName: "set_eq_band_enabled",
-        argNames: ["band", "on_"],
-      );
-
-  @override
-  void crateApiEngineApiSetEqBandFreq({required int band, required double hz}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_u_32(band, serializer);
-          sse_encode_f_32(hz, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiEngineApiSetEqBandFreqConstMeta,
-        argValues: [band, hz],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiEngineApiSetEqBandFreqConstMeta =>
-      const TaskConstMeta(
-        debugName: "set_eq_band_freq",
-        argNames: ["band", "hz"],
-      );
-
-  @override
-  void crateApiEngineApiSetEqBandGainDb({
-    required int band,
-    required double db,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_u_32(band, serializer);
-          sse_encode_f_32(db, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiEngineApiSetEqBandGainDbConstMeta,
-        argValues: [band, db],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiEngineApiSetEqBandGainDbConstMeta =>
-      const TaskConstMeta(
-        debugName: "set_eq_band_gain_db",
-        argNames: ["band", "db"],
-      );
-
-  @override
-  void crateApiEngineApiSetEqBandKind({required int band, required int kind}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_u_32(band, serializer);
-          sse_encode_u_32(kind, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiEngineApiSetEqBandKindConstMeta,
-        argValues: [band, kind],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiEngineApiSetEqBandKindConstMeta =>
-      const TaskConstMeta(
-        debugName: "set_eq_band_kind",
-        argNames: ["band", "kind"],
-      );
-
-  @override
-  void crateApiEngineApiSetEqBandQ({required int band, required double q}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_u_32(band, serializer);
-          sse_encode_f_32(q, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiEngineApiSetEqBandQConstMeta,
-        argValues: [band, q],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiEngineApiSetEqBandQConstMeta =>
-      const TaskConstMeta(debugName: "set_eq_band_q", argNames: ["band", "q"]);
-
-  @override
-  void crateApiEngineApiSetGainDb({required double db}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_f_32(db, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiEngineApiSetGainDbConstMeta,
-        argValues: [db],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiEngineApiSetGainDbConstMeta =>
-      const TaskConstMeta(debugName: "set_gain_db", argNames: ["db"]);
-
-  @override
-  void crateApiEngineApiSetGainLinear({required double linear}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_f_32(linear, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiEngineApiSetGainLinearConstMeta,
-        argValues: [linear],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiEngineApiSetGainLinearConstMeta =>
-      const TaskConstMeta(debugName: "set_gain_linear", argNames: ["linear"]);
-
-  @override
   void crateApiEngineApiSetLooping({required bool looping}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_bool(looping, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -606,27 +479,323 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "set_looping", argNames: ["looping"]);
 
   @override
-  void crateApiEngineApiSetPan({required double pan}) {
+  void crateApiEngineApiSetMasterGainDb({required double db}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_f_32(pan, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+          sse_encode_f_32(db, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: null,
         ),
-        constMeta: kCrateApiEngineApiSetPanConstMeta,
+        constMeta: kCrateApiEngineApiSetMasterGainDbConstMeta,
+        argValues: [db],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetMasterGainDbConstMeta =>
+      const TaskConstMeta(debugName: "set_master_gain_db", argNames: ["db"]);
+
+  @override
+  void crateApiEngineApiSetMasterGainLinear({required double linear}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_f_32(linear, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetMasterGainLinearConstMeta,
+        argValues: [linear],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetMasterGainLinearConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_master_gain_linear",
+        argNames: ["linear"],
+      );
+
+  @override
+  void crateApiEngineApiSetMasterPan({required double pan}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_f_32(pan, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetMasterPanConstMeta,
         argValues: [pan],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiEngineApiSetPanConstMeta =>
-      const TaskConstMeta(debugName: "set_pan", argNames: ["pan"]);
+  TaskConstMeta get kCrateApiEngineApiSetMasterPanConstMeta =>
+      const TaskConstMeta(debugName: "set_master_pan", argNames: ["pan"]);
+
+  @override
+  void crateApiEngineApiSetTrackEqBandEnabled({
+    required int track,
+    required int band,
+    required bool on_,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
+          sse_encode_u_32(band, serializer);
+          sse_encode_bool(on_, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetTrackEqBandEnabledConstMeta,
+        argValues: [track, band, on_],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetTrackEqBandEnabledConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_track_eq_band_enabled",
+        argNames: ["track", "band", "on_"],
+      );
+
+  @override
+  void crateApiEngineApiSetTrackEqBandFreq({
+    required int track,
+    required int band,
+    required double hz,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
+          sse_encode_u_32(band, serializer);
+          sse_encode_f_32(hz, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetTrackEqBandFreqConstMeta,
+        argValues: [track, band, hz],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetTrackEqBandFreqConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_track_eq_band_freq",
+        argNames: ["track", "band", "hz"],
+      );
+
+  @override
+  void crateApiEngineApiSetTrackEqBandGainDb({
+    required int track,
+    required int band,
+    required double db,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
+          sse_encode_u_32(band, serializer);
+          sse_encode_f_32(db, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetTrackEqBandGainDbConstMeta,
+        argValues: [track, band, db],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetTrackEqBandGainDbConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_track_eq_band_gain_db",
+        argNames: ["track", "band", "db"],
+      );
+
+  @override
+  void crateApiEngineApiSetTrackEqBandKind({
+    required int track,
+    required int band,
+    required int kind,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
+          sse_encode_u_32(band, serializer);
+          sse_encode_u_32(kind, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetTrackEqBandKindConstMeta,
+        argValues: [track, band, kind],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetTrackEqBandKindConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_track_eq_band_kind",
+        argNames: ["track", "band", "kind"],
+      );
+
+  @override
+  void crateApiEngineApiSetTrackEqBandQ({
+    required int track,
+    required int band,
+    required double q,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
+          sse_encode_u_32(band, serializer);
+          sse_encode_f_32(q, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetTrackEqBandQConstMeta,
+        argValues: [track, band, q],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetTrackEqBandQConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_track_eq_band_q",
+        argNames: ["track", "band", "q"],
+      );
+
+  @override
+  void crateApiEngineApiSetTrackGainDb({
+    required int track,
+    required double db,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
+          sse_encode_f_32(db, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 21)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetTrackGainDbConstMeta,
+        argValues: [track, db],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetTrackGainDbConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_track_gain_db",
+        argNames: ["track", "db"],
+      );
+
+  @override
+  void crateApiEngineApiSetTrackGainLinear({
+    required int track,
+    required double linear,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
+          sse_encode_f_32(linear, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 22)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetTrackGainLinearConstMeta,
+        argValues: [track, linear],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetTrackGainLinearConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_track_gain_linear",
+        argNames: ["track", "linear"],
+      );
+
+  @override
+  void crateApiEngineApiSetTrackPan({required int track, required double pan}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(track, serializer);
+          sse_encode_f_32(pan, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 23)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineApiSetTrackPanConstMeta,
+        argValues: [track, pan],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineApiSetTrackPanConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_track_pan",
+        argNames: ["track", "pan"],
+      );
 
   @override
   void crateApiEngineApiStop() {
@@ -634,7 +803,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -665,7 +834,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RustStreamSink<MeterLevels> dco_decode_StreamSink_meter_levels_Sse(
+  RustStreamSink<MixerMeters> dco_decode_StreamSink_mixer_meters_Sse(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -733,14 +902,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  MeterLevels dco_decode_meter_levels(dynamic raw) {
+  MixerMeters dco_decode_mixer_meters(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
-    return MeterLevels(
-      peakLeft: dco_decode_f_32(arr[0]),
-      peakRight: dco_decode_f_32(arr[1]),
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return MixerMeters(
+      trackPeaksL: dco_decode_list_prim_f_32_strict(arr[0]),
+      trackPeaksR: dco_decode_list_prim_f_32_strict(arr[1]),
+      masterPeakL: dco_decode_f_32(arr[2]),
+      masterPeakR: dco_decode_f_32(arr[3]),
     );
   }
 
@@ -796,7 +967,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RustStreamSink<MeterLevels> sse_decode_StreamSink_meter_levels_Sse(
+  RustStreamSink<MixerMeters> sse_decode_StreamSink_mixer_meters_Sse(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -870,11 +1041,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  MeterLevels sse_decode_meter_levels(SseDeserializer deserializer) {
+  MixerMeters sse_decode_mixer_meters(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_peakLeft = sse_decode_f_32(deserializer);
-    var var_peakRight = sse_decode_f_32(deserializer);
-    return MeterLevels(peakLeft: var_peakLeft, peakRight: var_peakRight);
+    var var_trackPeaksL = sse_decode_list_prim_f_32_strict(deserializer);
+    var var_trackPeaksR = sse_decode_list_prim_f_32_strict(deserializer);
+    var var_masterPeakL = sse_decode_f_32(deserializer);
+    var var_masterPeakR = sse_decode_f_32(deserializer);
+    return MixerMeters(
+      trackPeaksL: var_trackPeaksL,
+      trackPeaksR: var_trackPeaksR,
+      masterPeakL: var_masterPeakL,
+      masterPeakR: var_masterPeakR,
+    );
   }
 
   @protected
@@ -941,15 +1119,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_StreamSink_meter_levels_Sse(
-    RustStreamSink<MeterLevels> self,
+  void sse_encode_StreamSink_mixer_meters_Sse(
+    RustStreamSink<MixerMeters> self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(
       self.setupAndSerialize(
         codec: SseCodec(
-          decodeSuccessData: sse_decode_meter_levels,
+          decodeSuccessData: sse_decode_mixer_meters,
           decodeErrorData: sse_decode_AnyhowException,
         ),
       ),
@@ -1030,10 +1208,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_meter_levels(MeterLevels self, SseSerializer serializer) {
+  void sse_encode_mixer_meters(MixerMeters self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_f_32(self.peakLeft, serializer);
-    sse_encode_f_32(self.peakRight, serializer);
+    sse_encode_list_prim_f_32_strict(self.trackPeaksL, serializer);
+    sse_encode_list_prim_f_32_strict(self.trackPeaksR, serializer);
+    sse_encode_f_32(self.masterPeakL, serializer);
+    sse_encode_f_32(self.masterPeakR, serializer);
   }
 
   @protected

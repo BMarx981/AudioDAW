@@ -27,7 +27,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  RustStreamSink<MeterLevels> dco_decode_StreamSink_meter_levels_Sse(
+  RustStreamSink<MixerMeters> dco_decode_StreamSink_mixer_meters_Sse(
     dynamic raw,
   );
 
@@ -58,7 +58,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LoadedClip dco_decode_loaded_clip(dynamic raw);
 
   @protected
-  MeterLevels dco_decode_meter_levels(dynamic raw);
+  MixerMeters dco_decode_mixer_meters(dynamic raw);
 
   @protected
   PlaybackStatus dco_decode_playback_status(dynamic raw);
@@ -84,7 +84,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  RustStreamSink<MeterLevels> sse_decode_StreamSink_meter_levels_Sse(
+  RustStreamSink<MixerMeters> sse_decode_StreamSink_mixer_meters_Sse(
     SseDeserializer deserializer,
   );
 
@@ -115,7 +115,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LoadedClip sse_decode_loaded_clip(SseDeserializer deserializer);
 
   @protected
-  MeterLevels sse_decode_meter_levels(SseDeserializer deserializer);
+  MixerMeters sse_decode_mixer_meters(SseDeserializer deserializer);
 
   @protected
   PlaybackStatus sse_decode_playback_status(SseDeserializer deserializer);
@@ -148,8 +148,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_StreamSink_meter_levels_Sse(
-    RustStreamSink<MeterLevels> self,
+  void sse_encode_StreamSink_mixer_meters_Sse(
+    RustStreamSink<MixerMeters> self,
     SseSerializer serializer,
   );
 
@@ -187,7 +187,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_loaded_clip(LoadedClip self, SseSerializer serializer);
 
   @protected
-  void sse_encode_meter_levels(MeterLevels self, SseSerializer serializer);
+  void sse_encode_mixer_meters(MixerMeters self, SseSerializer serializer);
 
   @protected
   void sse_encode_playback_status(

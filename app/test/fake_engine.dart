@@ -7,16 +7,23 @@ import 'package:daw/engine/engine_interface.dart';
 /// and never touches Rust. This is the seam TESTING.md describes — widget tests
 /// run entirely against this.
 class FakeEngine implements EngineInterface {
-  final List<String> loadedPaths = [];
+  @override
+  int get maxTracks => 8;
+
+  /// Every (track, path) pair `loadWav` was called with, in call order.
+  final List<({int track, String path})> loadedClips = [];
   int playCount = 0;
   int pauseCount = 0;
   int stopCount = 0;
   final List<double> seeks = [];
   final List<bool> loopings = [];
-  final List<double> gainDbs = [];
-  final List<double> gainLinears = [];
-  final List<double> pans = [];
-  final List<String> eqCalls = [];
+  final List<({int track, double db})> trackGainDbs = [];
+  final List<({int track, double linear})> trackGainLinears = [];
+  final List<({int track, double pan})> trackPans = [];
+  final List<String> trackEqCalls = [];
+  final List<double> masterGainDbs = [];
+  final List<double> masterGainLinears = [];
+  final List<double> masterPans = [];
   bool _running = false;
 
   /// If set, [loadWav] throws this — used to test the error path.
@@ -34,9 +41,9 @@ class FakeEngine implements EngineInterface {
   );
 
   @override
-  Future<ClipInfo> loadWav(String path) async {
+  Future<ClipInfo> loadWav(int track, String path) async {
     if (loadError != null) throw loadError!;
-    loadedPaths.add(path);
+    loadedClips.add((track: track, path: path));
     _running = true;
     return loadResult;
   }
@@ -57,29 +64,45 @@ class FakeEngine implements EngineInterface {
   void setLooping(bool looping) => loopings.add(looping);
 
   @override
-  void setGainDb(double db) => gainDbs.add(db);
+  void setTrackGainDb(int track, double db) =>
+      trackGainDbs.add((track: track, db: db));
 
   @override
-  void setGainLinear(double linear) => gainLinears.add(linear);
+  void setTrackGainLinear(int track, double linear) =>
+      trackGainLinears.add((track: track, linear: linear));
 
   @override
-  void setPan(double pan) => pans.add(pan);
+  void setTrackPan(int track, double pan) =>
+      trackPans.add((track: track, pan: pan));
 
   @override
-  void setEqBandKind(int band, EqFilterKind kind) =>
-      eqCalls.add('kind:$band:${kind.name}');
+  void setTrackEqBandKind(int track, int band, EqFilterKind kind) =>
+      trackEqCalls.add('kind:$track:$band:${kind.name}');
 
   @override
-  void setEqBandFreq(int band, double hz) => eqCalls.add('freq:$band:$hz');
+  void setTrackEqBandFreq(int track, int band, double hz) =>
+      trackEqCalls.add('freq:$track:$band:$hz');
 
   @override
-  void setEqBandQ(int band, double q) => eqCalls.add('q:$band:$q');
+  void setTrackEqBandQ(int track, int band, double q) =>
+      trackEqCalls.add('q:$track:$band:$q');
 
   @override
-  void setEqBandGainDb(int band, double db) => eqCalls.add('gain:$band:$db');
+  void setTrackEqBandGainDb(int track, int band, double db) =>
+      trackEqCalls.add('gain:$track:$band:$db');
 
   @override
-  void setEqBandEnabled(int band, bool on) => eqCalls.add('enabled:$band:$on');
+  void setTrackEqBandEnabled(int track, int band, bool on) =>
+      trackEqCalls.add('enabled:$track:$band:$on');
+
+  @override
+  void setMasterGainDb(double db) => masterGainDbs.add(db);
+
+  @override
+  void setMasterGainLinear(double linear) => masterGainLinears.add(linear);
+
+  @override
+  void setMasterPan(double pan) => masterPans.add(pan);
 
   @override
   double get engineSampleRate => 48000;
@@ -94,8 +117,8 @@ class FakeEngine implements EngineInterface {
       StreamController<Float32List>.broadcast();
   final StreamController<PlaybackState> _playback =
       StreamController<PlaybackState>.broadcast();
-  final StreamController<MeterLevels> _meter =
-      StreamController<MeterLevels>.broadcast();
+  final StreamController<MixerMeters> _meters =
+      StreamController<MixerMeters>.broadcast();
 
   @override
   Stream<Float32List> get scopeFrames => _scope.stream;
@@ -104,18 +127,19 @@ class FakeEngine implements EngineInterface {
   Stream<PlaybackState> get playbackState => _playback.stream;
 
   @override
-  Stream<MeterLevels> get meterLevels => _meter.stream;
+  Stream<MixerMeters> get mixerMeters => _meters.stream;
 
   void emitScopeFrame(Float32List frame) => _scope.add(frame);
   void emitPlaybackState(PlaybackState state) => _playback.add(state);
-  void emitMeterLevels(MeterLevels levels) => _meter.add(levels);
+  void emitMixerMeters(MixerMeters meters) => _meters.add(meters);
 
   /// The most recent path passed to [loadWav], or null if none.
-  String? get lastLoadedPath => loadedPaths.isEmpty ? null : loadedPaths.last;
+  String? get lastLoadedPath =>
+      loadedClips.isEmpty ? null : loadedClips.last.path;
 
   void dispose() {
     _scope.close();
     _playback.close();
-    _meter.close();
+    _meters.close();
   }
 }

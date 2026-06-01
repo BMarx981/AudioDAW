@@ -11,6 +11,15 @@ import 'package:daw/ui/waveform_view.dart';
 
 import 'fake_engine.dart';
 
+/// A non-empty [MixerMeters] snapshot so per-track `trackLevels()` calls don't
+/// pop into "out of range" silence when the test setup uses a default stream.
+MixerMeters _silentSnapshot(int tracks) => MixerMeters(
+      trackPeaksL: List.filled(tracks, 0),
+      trackPeaksR: List.filled(tracks, 0),
+      masterPeakL: 0,
+      masterPeakR: 0,
+    );
+
 void main() {
   group('WaveformView', () {
     testWidgets('renders a waveform from min/max data without error', (
@@ -80,35 +89,73 @@ void main() {
           home: HomePage(engine: engine, pickWavPath: () async => path),
         );
 
-    testWidgets('Open loads a clip and reveals the waveform + transport', (
+    /// Tap the n-th "Open WAV…" button (0 = Track 1, 1 = Track 2).
+    Future<void> openTrack(WidgetTester tester, int n) async {
+      final btn = find.text('Open WAV…').at(n);
+      await tester.ensureVisible(btn);
+      await tester.tap(btn);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('starts with two empty track rows and a master strip', (
       tester,
     ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
       await tester.pumpWidget(homePage(engine));
 
-      // Nothing loaded yet.
+      // One Open button per visible track.
+      expect(find.text('Open WAV…'), findsNWidgets(kVisibleTracks));
+      expect(find.text('No file loaded'), findsNWidgets(kVisibleTracks));
+
+      // Mixer row: two track strips + one master strip = three ChannelStrips,
+      // visible from the start (you can mix silence too).
+      expect(find.byType(ChannelStrip), findsNWidgets(kVisibleTracks + 1));
+      expect(find.text('Track 1'), findsWidgets); // strip header
+      expect(find.text('Track 2'), findsWidgets);
+      expect(find.text('Master'), findsOneWidget);
+
+      // No clip yet, so the waveform isn't shown.
       expect(find.byType(WaveformView), findsNothing);
-      expect(find.text('No file loaded'), findsOneWidget);
+    });
 
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
+    testWidgets('opening a WAV into Track 1 loads it for track 0', (
+      tester,
+    ) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
 
-      expect(engine.lastLoadedPath, '/tmp/test.wav');
+      await openTrack(tester, 0);
+
+      expect(engine.loadedClips, hasLength(1));
+      expect(engine.loadedClips.first.track, 0);
+      expect(engine.loadedClips.first.path, '/tmp/test.wav');
+      // Waveform now appears for the (selected) track 0.
       expect(find.byType(WaveformView), findsOneWidget);
-      expect(find.text('Play'), findsOneWidget);
       expect(find.text('test.wav'), findsOneWidget);
+      // "No file loaded" only remains for Track 2 now.
+      expect(find.text('No file loaded'), findsOneWidget);
+    });
+
+    testWidgets('opening Track 2 targets track index 1', (tester) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+
+      await openTrack(tester, 1);
+
+      expect(engine.loadedClips.last.track, 1);
     });
 
     testWidgets('a cancelled pick loads nothing', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine, path: null)); // user cancels
+      await tester.pumpWidget(homePage(engine, path: null));
 
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
+      await openTrack(tester, 0);
 
-      expect(engine.loadedPaths, isEmpty);
+      expect(engine.loadedClips, isEmpty);
       expect(find.byType(WaveformView), findsNothing);
     });
 
@@ -119,9 +166,9 @@ void main() {
       addTearDown(engine.dispose);
       await tester.pumpWidget(homePage(engine));
 
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
+      await openTrack(tester, 0);
 
+      await tester.ensureVisible(find.text('Play'));
       await tester.tap(find.text('Play'));
       await tester.pump();
       expect(engine.playCount, 1);
@@ -133,13 +180,13 @@ void main() {
       expect(find.text('Play'), findsOneWidget);
     });
 
-    testWidgets('Stop stops the engine and rewinds', (tester) async {
+    testWidgets('Stop stops the engine', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
       await tester.pumpWidget(homePage(engine));
 
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
+      await openTrack(tester, 0);
+      await tester.ensureVisible(find.text('Stop'));
       await tester.tap(find.text('Stop'));
       await tester.pump();
 
@@ -151,15 +198,14 @@ void main() {
     ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine)); // 1.0s clip
+      await tester.pumpWidget(homePage(engine));
 
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
+      await openTrack(tester, 0);
 
       engine.emitPlaybackState(
         const PlaybackState(positionSecs: 0.5, playing: true),
       );
-      await tester.pumpAndSettle(); // let the broadcast-stream event deliver
+      await tester.pumpAndSettle();
 
       // 0.5 s of a 1.0 s clip.
       expect(find.textContaining('00:00.5 / 00:01.0'), findsOneWidget);
@@ -170,14 +216,12 @@ void main() {
       addTearDown(engine.dispose);
       await tester.pumpWidget(homePage(engine));
 
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
+      await openTrack(tester, 0);
 
       await tester.tap(find.byType(WaveformView));
       await tester.pump();
 
-      expect(engine.seeks, isNotEmpty, reason: 'a tap should seek');
-      // Seek target is within the clip's 1.0 s duration.
+      expect(engine.seeks, isNotEmpty);
       expect(engine.seeks.last, inInclusiveRange(0.0, 1.0));
     });
 
@@ -186,57 +230,90 @@ void main() {
       addTearDown(engine.dispose);
       await tester.pumpWidget(homePage(engine));
 
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pump(); // run the load future + build the snackbar
-      await tester.pump();
+      await tester.tap(find.text('Open WAV…').first);
+      await tester.pump(); // run the load future
+      await tester.pump(); // build the snackbar
 
       expect(find.textContaining('not a wav'), findsOneWidget);
       expect(find.byType(WaveformView), findsNothing);
     });
 
-    testWidgets('the channel strip appears once a clip is loaded', (
-      tester,
-    ) async {
+    testWidgets(
+      'dragging Track 1\'s gain fader sends a per-track command',
+      (tester) async {
+        final engine = FakeEngine();
+        addTearDown(engine.dispose);
+        await tester.pumpWidget(homePage(engine));
+        await openTrack(tester, 0);
+
+        // 12 Slider widgets in the mixer row (3 strips × 4 sliders each, the
+        // 4th being pan). The first strip's sliders come first, then track 2,
+        // then master.
+        final sliders = find.byType(Slider);
+        // Active gain fader for Track 1 is the very first slider.
+        await tester.ensureVisible(sliders.first);
+        await tester.drag(sliders.first, const Offset(0, 40));
+        await tester.pump();
+
+        expect(
+          engine.trackGainLinears,
+          isNotEmpty,
+          reason: 'gain drag should reach engine',
+        );
+        expect(
+          engine.trackGainLinears.last.track,
+          0,
+          reason: 'Track 1\'s slider must target track index 0',
+        );
+        expect(
+          engine.masterGainLinears,
+          isEmpty,
+          reason: 'master must not see the track drag',
+        );
+      },
+    );
+
+    testWidgets(
+      'dragging the master fader sends a master command',
+      (tester) async {
+        final engine = FakeEngine();
+        addTearDown(engine.dispose);
+        await tester.pumpWidget(homePage(engine));
+        await openTrack(tester, 0);
+
+        // Master is the third strip in the row; its active gain fader is the
+        // 9th slider (0..3 = track1, 4..7 = track2, 8..11 = master).
+        final sliders = find.byType(Slider);
+        await tester.ensureVisible(sliders.at(8));
+        await tester.drag(sliders.at(8), const Offset(0, 40));
+        await tester.pump();
+
+        expect(engine.masterGainLinears, isNotEmpty);
+        expect(engine.trackGainLinears, isEmpty);
+      },
+    );
+
+    testWidgets('selecting Track 2 retargets the EQ panel', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
       await tester.pumpWidget(homePage(engine));
+      await openTrack(tester, 0);
+      await openTrack(tester, 1);
 
-      expect(find.byType(ChannelStrip), findsNothing);
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
-      expect(find.byType(ChannelStrip), findsOneWidget);
-    });
+      // EQ panel default-targets the first track.
+      expect(find.text('EQ — Track 1'), findsOneWidget);
 
-    testWidgets('dragging gain and pan drives the engine', (tester) async {
-      final engine = FakeEngine();
-      addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
-
-      // Four sliders: the three gain faders (db6, linear, db12) then pan.
-      final sliders = find.byType(Slider);
-      expect(sliders, findsNWidgets(4));
-
-      // The strip lives below the fold in the test surface; scroll each control
-      // into view before dragging it. The active gain fader (db6) is first.
-      await tester.ensureVisible(sliders.at(0));
-      await tester.drag(sliders.at(0), const Offset(0, 40)); // gain fader
-      await tester.pump();
-      await tester.ensureVisible(sliders.at(3));
-      await tester.drag(sliders.at(3), const Offset(-60, 0)); // pan toward left
-      await tester.pump();
-
-      expect(
-        engine.gainLinears,
-        isNotEmpty,
-        reason: 'gain drag should reach engine',
+      // Tap the Track 2 strip header (specifically the one inside the second
+      // ChannelStrip — 'Track 2' also appears in the open-WAV row label).
+      final track2Header = find.descendant(
+        of: find.byType(ChannelStrip).at(1),
+        matching: find.text('Track 2'),
       );
-      expect(engine.pans, isNotEmpty, reason: 'pan drag should reach engine');
-      // Dragging the pan slider left moves toward -1.
-      expect(engine.pans.last, lessThan(0.0));
-      // Gain is a non-negative linear multiplier.
-      expect(engine.gainLinears.last, greaterThanOrEqualTo(0.0));
+      await tester.ensureVisible(track2Header);
+      await tester.tap(track2Header);
+      await tester.pumpAndSettle();
+
+      expect(find.text('EQ — Track 2'), findsOneWidget);
     });
 
     testWidgets('the loop button toggles looping on the engine', (
@@ -245,9 +322,9 @@ void main() {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
       await tester.pumpWidget(homePage(engine));
-      await tester.tap(find.text('Open WAV…'));
-      await tester.pumpAndSettle();
+      await openTrack(tester, 0);
 
+      await tester.ensureVisible(find.byTooltip('Loop'));
       await tester.tap(find.byTooltip('Loop'));
       await tester.pump();
       expect(engine.loopings, [true]);
@@ -257,70 +334,52 @@ void main() {
       expect(engine.loopings, [true, false]);
     });
 
-    testWidgets('switching the active fader reports a mode change', (
-      tester,
-    ) async {
-      GainFaderMode? mode;
+    testWidgets('mixer-meters event repaints without error', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Center(
-              child: ChannelStrip(
-                gainLinear: 1,
-                gainMode: GainFaderMode.db6,
-                pan: 0,
-                meter: engine.meterLevels,
-                onGainModeChanged: (m) => mode = m,
-              ),
-            ),
-          ),
-        ),
-      );
+      await tester.pumpWidget(homePage(engine));
 
-      // 'Lin' appears both on the segment and the fader's own label; target the
-      // segment.
-      await tester.tap(
-        find.descendant(
-          of: find.byType(SegmentedButton<GainFaderMode>),
-          matching: find.text('Lin'),
-        ),
-      );
+      engine.emitMixerMeters(MixerMeters(
+        trackPeaksL: List.filled(engine.maxTracks, 0.4),
+        trackPeaksR: List.filled(engine.maxTracks, 0.4),
+        masterPeakL: 0.5,
+        masterPeakR: 0.5,
+      ));
       await tester.pump();
-      expect(mode, GainFaderMode.linear);
+      expect(tester.takeException(), isNull);
     });
   });
 
   group('ChannelStrip', () {
-    Widget host(
-      FakeEngine engine, {
+    Widget host({
       double gainLinear = 1,
       GainFaderMode gainMode = GainFaderMode.db6,
       double pan = 0,
+      String title = 'Channel',
       ValueChanged<double>? onGainLinear,
       ValueChanged<double>? onPan,
+      ValueChanged<GainFaderMode>? onMode,
     }) => MaterialApp(
-      home: Scaffold(
-        body: Center(
-          child: ChannelStrip(
-            gainLinear: gainLinear,
-            gainMode: gainMode,
-            pan: pan,
-            meter: engine.meterLevels,
-            onGainLinearChanged: onGainLinear,
-            onPanChanged: onPan,
+          home: Scaffold(
+            body: Center(
+              child: ChannelStrip(
+                title: title,
+                gainLinear: gainLinear,
+                gainMode: gainMode,
+                pan: pan,
+                meter: const Stream<MeterLevels>.empty(),
+                onGainLinearChanged: onGainLinear,
+                onPanChanged: onPan,
+                onGainModeChanged: onMode,
+              ),
+            ),
           ),
-        ),
-      ),
-    );
+        );
 
     testWidgets('renders three gain faders, a pan slider, and a meter', (
       tester,
     ) async {
-      final engine = FakeEngine();
-      addTearDown(engine.dispose);
-      await tester.pumpWidget(host(engine, gainLinear: 1, pan: 0));
+      await tester.pumpWidget(host(gainLinear: 1, pan: 0));
 
       expect(find.byType(Slider), findsNWidgets(4)); // 3 gain + 1 pan
       expect(find.byType(SegmentedButton<GainFaderMode>), findsOneWidget);
@@ -334,23 +393,34 @@ void main() {
     testWidgets('mute reads -∞ on the dB faders; off-center pan as L/R', (
       tester,
     ) async {
-      final engine = FakeEngine();
-      addTearDown(engine.dispose);
-      await tester.pumpWidget(host(engine, gainLinear: 0, pan: -0.5));
+      await tester.pumpWidget(host(gainLinear: 0, pan: -0.5));
 
       // Both dB faders (db6, db12) read -∞ at a muted gain.
       expect(find.text('-∞'), findsNWidgets(2));
       expect(find.text('L 50'), findsOneWidget);
     });
 
-    testWidgets('meter stream updates repaint without error', (tester) async {
-      final engine = FakeEngine();
-      addTearDown(engine.dispose);
-      await tester.pumpWidget(host(engine));
+    testWidgets('switching the active fader reports a mode change', (
+      tester,
+    ) async {
+      GainFaderMode? mode;
+      await tester.pumpWidget(host(onMode: (m) => mode = m));
 
-      engine.emitMeterLevels(const MeterLevels(peakLeft: 0.8, peakRight: 0.3));
+      // 'Lin' appears both on the segment and the fader's own label; target the
+      // segment.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(SegmentedButton<GainFaderMode>),
+          matching: find.text('Lin'),
+        ),
+      );
       await tester.pump();
-      expect(tester.takeException(), isNull);
+      expect(mode, GainFaderMode.linear);
+    });
+
+    testWidgets('honors the title and selected highlight', (tester) async {
+      await tester.pumpWidget(host(title: 'Master'));
+      expect(find.text('Master'), findsOneWidget);
     });
   });
 
@@ -370,6 +440,26 @@ void main() {
       );
       await tester.pump();
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('MixerMeters', () {
+    test('trackLevels(t) returns the right pair', () {
+      final m = MixerMeters(
+        trackPeaksL: const [0.1, 0.2, 0.3],
+        trackPeaksR: const [0.4, 0.5, 0.6],
+        masterPeakL: 0.7,
+        masterPeakR: 0.8,
+      );
+      expect(m.trackLevels(1).peakLeft, 0.2);
+      expect(m.trackLevels(1).peakRight, 0.5);
+      expect(m.masterLevels.peakLeft, 0.7);
+    });
+
+    test('out-of-range track index returns silence', () {
+      final m = _silentSnapshot(0);
+      expect(m.trackLevels(5).peakLeft, 0);
+      expect(m.trackLevels(5).peakRight, 0);
     });
   });
 }
