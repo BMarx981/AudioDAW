@@ -1,7 +1,8 @@
-//! [`Strip`] — a channel strip: source → gain → pan → output, plus a meter.
+//! [`Strip`] — a channel strip: source → EQ → gain → pan → output, plus a meter.
 //!
 //! This is the seed of the eventual audio graph. It owns the realtime source
-//! ([`WavPlayer`]), the in-order DSP units ([`Gain`] then [`Pan`]), the
+//! ([`WavPlayer`]), the in-order DSP units ([`Eq`], then [`Gain`], then [`Pan`]),
+//! the
 //! pre-allocated planar scratch buffers the chain processes in, and the
 //! post-fader peak meter. The audio callback owns one `Strip` and calls
 //! [`Strip::process`] per buffer.
@@ -19,7 +20,8 @@
 //! ## Signal flow each chunk
 //!
 //! 1. [`WavPlayer::render`] fills the planar scratch (`left`, `right`).
-//! 2. [`Gain`] then [`Pan`] process the scratch in place (per-sample smoothed).
+//! 2. [`Eq`], then [`Gain`], then [`Pan`] process the scratch in place
+//!    (per-sample / per-sub-block smoothed).
 //! 3. We interleave the scratch onto the device buffer, and on the way:
 //!    - update the post-fader peak meter (one running peak-hold per channel),
 //!    - tap the post-fader mono mix into the oscilloscope ring.
@@ -33,7 +35,7 @@ use rtrb::Producer;
 
 use crate::clip::AudioClip;
 use crate::commands::Command;
-use crate::dsp::{Gain, Pan, Process};
+use crate::dsp::{Eq, FilterKind, Gain, Pan, Process};
 
 /// Largest block (in frames) the strip processes in one pass. Device buffers
 /// are almost always well under this (128–2048 typical); anything larger is
@@ -50,9 +52,13 @@ const INITIAL_PAN: f32 = 0.0;
 /// release is a ~300 ms exponential decay so peaks are readable, not flickery.
 const METER_RELEASE_SECS: f32 = 0.3;
 
-/// A single channel strip: WAV source, gain, pan, and a post-fader peak meter.
+/// A single channel strip: WAV source, EQ, gain, pan, and a post-fader peak
+/// meter.
 pub struct Strip {
     player: WavPlayerSource,
+    /// 4-band parametric EQ, pre-fader (the standard place: shape the tone, then
+    /// set the level).
+    eq: Eq,
     gain: Gain,
     pan: Pan,
     /// Planar scratch, pre-allocated to [`MAX_BLOCK`] and only ever sliced.
@@ -75,6 +81,7 @@ impl Strip {
     pub fn new(device_rate: f32) -> Self {
         Self {
             player: WavPlayerSource::new(device_rate),
+            eq: Eq::new(device_rate),
             gain: Gain::new(device_rate, INITIAL_GAIN_DB),
             pan: Pan::new(device_rate, INITIAL_PAN),
             scratch_l: vec![0.0; MAX_BLOCK],
@@ -98,6 +105,13 @@ impl Strip {
             Command::SetGainDb(db) => self.gain.set_db(db),
             Command::SetGainLinear(lin) => self.gain.set_linear(lin),
             Command::SetPan(p) => self.pan.set_pos(p),
+            Command::SetEqBandKind(n, code) => {
+                self.eq.set_band_kind(n as usize, FilterKind::from_code(code))
+            }
+            Command::SetEqBandFreq(n, hz) => self.eq.set_band_freq(n as usize, hz),
+            Command::SetEqBandQ(n, q) => self.eq.set_band_q(n as usize, q),
+            Command::SetEqBandGainDb(n, db) => self.eq.set_band_gain_db(n as usize, db),
+            Command::SetEqBandEnabled(n, on) => self.eq.set_band_enabled(n as usize, on),
         }
     }
 
@@ -166,9 +180,10 @@ impl Strip {
         // 1. Source -> planar scratch.
         self.player.render(left, right);
 
-        // 2. Gain then pan, in place. `block` borrows the two scratch slices; the
-        //    borrow checker guarantees the units can't alias them.
+        // 2. EQ, then gain, then pan, in place. `block` borrows the two scratch
+        //    slices; the borrow checker guarantees the units can't alias them.
         let mut block: [&mut [f32]; 2] = [left, right];
+        self.eq.process(&mut block);
         self.gain.process(&mut block);
         self.pan.process(&mut block);
 

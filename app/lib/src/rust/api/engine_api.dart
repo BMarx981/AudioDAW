@@ -53,6 +53,43 @@ void setGainLinear({required double linear}) =>
 void setPan({required double pan}) =>
     RustLib.instance.api.crateApiEngineApiSetPan(pan: pan);
 
+/// Set EQ band `n`'s filter kind, by integer code (0=peak, 1=low-shelf,
+/// 2=high-shelf, 3=low-pass, 4=high-pass, 5=band-pass, 6=notch). We pass the kind
+/// as a small int rather than mirroring the engine's `FilterKind` enum across the
+/// bridge: that enum lives in `dsp::biquad` next to types (`Biquad`, `Eq`) that
+/// carry fixed-size arrays flutter_rust_bridge can't parse, so naming the enum
+/// anywhere the bridge scans drags those in and breaks codegen. The int→kind
+/// mapping happens inside the engine, which the bridge never scans.
+/// Fire-and-forget.
+void setEqBandKind({required int band, required int kind}) =>
+    RustLib.instance.api.crateApiEngineApiSetEqBandKind(band: band, kind: kind);
+
+/// Set EQ band `n`'s center/corner frequency in Hz. Fire-and-forget; safe on
+/// every knob tick — the value is smoothed on the audio thread, so a sweep is
+/// click-free.
+void setEqBandFreq({required int band, required double hz}) =>
+    RustLib.instance.api.crateApiEngineApiSetEqBandFreq(band: band, hz: hz);
+
+/// Set EQ band `n`'s Q (bandwidth). Fire-and-forget; smoothed on the audio thread.
+void setEqBandQ({required int band, required double q}) =>
+    RustLib.instance.api.crateApiEngineApiSetEqBandQ(band: band, q: q);
+
+/// Set EQ band `n`'s gain in dB (peak/shelf kinds). Fire-and-forget; smoothed.
+void setEqBandGainDb({required int band, required double db}) =>
+    RustLib.instance.api.crateApiEngineApiSetEqBandGainDb(band: band, db: db);
+
+/// Enable/disable EQ band `n` (true bypass when off). Fire-and-forget.
+void setEqBandEnabled({required int band, required bool on_}) => RustLib
+    .instance
+    .api
+    .crateApiEngineApiSetEqBandEnabled(band: band, on_: on_);
+
+/// The output sample rate (Hz) the engine is running at, or 48000 if it hasn't
+/// started yet. The UI draws the EQ response curve at this rate so it matches
+/// what the audio thread actually filters with.
+double engineSampleRate() =>
+    RustLib.instance.api.crateApiEngineApiEngineSampleRate();
+
 /// Whether the audio engine is running (device open). Handy for the UI.
 bool isRunning() => RustLib.instance.api.crateApiEngineApiIsRunning();
 

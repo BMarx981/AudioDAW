@@ -64,6 +64,33 @@ impl SmoothedParam {
         self.current += (self.target - self.current) * self.coeff;
         self.current
     }
+
+    /// The value emitted on the last [`next`](Self::next) (the audio-rate value).
+    #[inline]
+    pub fn current(&self) -> f32 {
+        self.current
+    }
+
+    /// The value being glided toward (the UI-rate target).
+    #[inline]
+    pub fn target(&self) -> f32 {
+        self.target
+    }
+
+    /// Whether `current` has effectively reached `target`. Uses a small relative
+    /// tolerance so it works across scales (Hz in the thousands vs. a Q near 1).
+    /// Lets a caller stop recomputing expensive derived values once a glide ends.
+    #[inline]
+    pub fn settled(&self) -> bool {
+        (self.current - self.target).abs() <= 1e-4 * self.target.abs().max(1.0)
+    }
+
+    /// Snap `current` exactly onto `target` (no glide). Handy once a parameter
+    /// has settled, to avoid an asymptotic value that never quite arrives.
+    #[inline]
+    pub fn snap(&mut self) {
+        self.current = self.target;
+    }
 }
 
 #[cfg(test)]

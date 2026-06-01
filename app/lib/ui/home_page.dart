@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../engine/engine_interface.dart';
 import 'channel_strip.dart';
+import 'eq_view.dart';
 import 'oscilloscope.dart';
 import 'waveform_view.dart';
 
@@ -47,6 +48,11 @@ class _HomePageState extends State<HomePage> {
   double _gainLinear = 1; // unity
   GainFaderMode _gainMode = GainFaderMode.db6;
   double _pan = 0; // center
+
+  // EQ band state mirrors the engine's defaults; the engine keeps the smoothed
+  // audio-rate copy. The sample rate (read once) is what the curve is drawn at.
+  List<EqBand> _eqBands = List.of(kDefaultEqBands);
+  late final double _eqSampleRate = widget.engine.engineSampleRate;
 
   late final StreamSubscription<PlaybackState> _statusSub;
 
@@ -151,11 +157,41 @@ class _HomePageState extends State<HomePage> {
     widget.engine.setPan(pan);
   }
 
+  // EQ edits: update local state for the curve, then forward to the engine.
+  void _updateBand(int i, EqBand band) {
+    setState(() => _eqBands = [..._eqBands]..[i] = band);
+  }
+
+  void _onEqFreq(int i, double hz) {
+    _updateBand(i, _eqBands[i].copyWith(freqHz: hz));
+    widget.engine.setEqBandFreq(i, hz);
+  }
+
+  void _onEqGain(int i, double db) {
+    _updateBand(i, _eqBands[i].copyWith(gainDb: db));
+    widget.engine.setEqBandGainDb(i, db);
+  }
+
+  void _onEqQ(int i, double q) {
+    _updateBand(i, _eqBands[i].copyWith(q: q));
+    widget.engine.setEqBandQ(i, q);
+  }
+
+  void _onEqKind(int i, EqFilterKind kind) {
+    _updateBand(i, _eqBands[i].copyWith(kind: kind));
+    widget.engine.setEqBandKind(i, kind);
+  }
+
+  void _onEqEnabled(int i, bool on) {
+    _updateBand(i, _eqBands[i].copyWith(enabled: on));
+    widget.engine.setEqBandEnabled(i, on);
+  }
+
   @override
   Widget build(BuildContext context) {
     final clip = _clip;
     return Scaffold(
-      appBar: AppBar(title: const Text('WAV Player — Milestone 1')),
+      appBar: AppBar(title: const Text('DAW — Milestone 3 (EQ)')),
       body: Center(
         child: SingleChildScrollView(
           child: ConstrainedBox(
@@ -234,6 +270,16 @@ class _HomePageState extends State<HomePage> {
                         onGainModeChanged: _onGainModeChanged,
                         onPanChanged: _onPanChanged,
                       ),
+                    ),
+                    const SizedBox(height: 24),
+                    EqView(
+                      bands: _eqBands,
+                      sampleRate: _eqSampleRate,
+                      onFreqChanged: _onEqFreq,
+                      onGainChanged: _onEqGain,
+                      onQChanged: _onEqQ,
+                      onKindChanged: _onEqKind,
+                      onEnabledChanged: _onEqEnabled,
                     ),
                     const SizedBox(height: 24),
                   ],

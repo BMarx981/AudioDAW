@@ -48,6 +48,21 @@ pub enum Command {
     /// Set the channel-strip pan target, in `[-1, 1]` (−1 = left, +1 = right).
     /// Clamped and smoothed by the [`crate::dsp::Pan`] unit.
     SetPan(f32),
+    /// Set EQ band `n`'s filter kind, by integer code (see
+    /// [`crate::dsp::FilterKind::from_code`]). Carried as a `u8` rather than the
+    /// `FilterKind` enum so this command type — reachable from the bridge crate
+    /// via the engine's command ring — names no `dsp` type. That keeps
+    /// flutter_rust_bridge from following the reference into the DSP module and
+    /// tripping over its array-bearing structs (`Biquad`, `Eq`).
+    SetEqBandKind(u8, u8),
+    /// Set EQ band `n`'s center/corner frequency, Hz. Smoothed by the EQ.
+    SetEqBandFreq(u8, f32),
+    /// Set EQ band `n`'s Q (bandwidth). Smoothed by the EQ.
+    SetEqBandQ(u8, f32),
+    /// Set EQ band `n`'s gain, dB (peak/shelf kinds). Smoothed by the EQ.
+    SetEqBandGainDb(u8, f32),
+    /// Enable/disable EQ band `n` (true bypass when off).
+    SetEqBandEnabled(u8, bool),
 }
 
 /// Number of in-flight commands the ring can hold. Far more than the UI can

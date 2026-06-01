@@ -172,6 +172,58 @@ pub fn set_pan(pan: f32) {
     with_engine(|e| e.set_pan(pan));
 }
 
+/// Set EQ band `n`'s filter kind, by integer code (0=peak, 1=low-shelf,
+/// 2=high-shelf, 3=low-pass, 4=high-pass, 5=band-pass, 6=notch). We pass the kind
+/// as a small int rather than mirroring the engine's `FilterKind` enum across the
+/// bridge: that enum lives in `dsp::biquad` next to types (`Biquad`, `Eq`) that
+/// carry fixed-size arrays flutter_rust_bridge can't parse, so naming the enum
+/// anywhere the bridge scans drags those in and breaks codegen. The int→kind
+/// mapping happens inside the engine, which the bridge never scans.
+/// Fire-and-forget.
+#[frb(sync)]
+pub fn set_eq_band_kind(band: u32, kind: u32) {
+    with_engine(|e| e.set_eq_band_kind(band as u8, kind));
+}
+
+/// Set EQ band `n`'s center/corner frequency in Hz. Fire-and-forget; safe on
+/// every knob tick — the value is smoothed on the audio thread, so a sweep is
+/// click-free.
+#[frb(sync)]
+pub fn set_eq_band_freq(band: u32, hz: f32) {
+    with_engine(|e| e.set_eq_band_freq(band as u8, hz));
+}
+
+/// Set EQ band `n`'s Q (bandwidth). Fire-and-forget; smoothed on the audio thread.
+#[frb(sync)]
+pub fn set_eq_band_q(band: u32, q: f32) {
+    with_engine(|e| e.set_eq_band_q(band as u8, q));
+}
+
+/// Set EQ band `n`'s gain in dB (peak/shelf kinds). Fire-and-forget; smoothed.
+#[frb(sync)]
+pub fn set_eq_band_gain_db(band: u32, db: f32) {
+    with_engine(|e| e.set_eq_band_gain_db(band as u8, db));
+}
+
+/// Enable/disable EQ band `n` (true bypass when off). Fire-and-forget.
+#[frb(sync)]
+pub fn set_eq_band_enabled(band: u32, on: bool) {
+    with_engine(|e| e.set_eq_band_enabled(band as u8, on));
+}
+
+/// The output sample rate (Hz) the engine is running at, or 48000 if it hasn't
+/// started yet. The UI draws the EQ response curve at this rate so it matches
+/// what the audio thread actually filters with.
+#[frb(sync)]
+pub fn engine_sample_rate() -> f32 {
+    if let Ok(guard) = ENGINE.lock() {
+        if let Some(e) = guard.as_ref() {
+            return e.sample_rate();
+        }
+    }
+    48_000.0
+}
+
 /// Whether the audio engine is running (device open). Handy for the UI.
 #[frb(sync)]
 pub fn is_running() -> bool {

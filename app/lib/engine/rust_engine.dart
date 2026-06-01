@@ -46,6 +46,28 @@ class RustEngine implements EngineInterface {
   void setPan(double pan) => rust.setPan(pan: pan);
 
   @override
+  void setEqBandKind(int band, EqFilterKind kind) =>
+      rust.setEqBandKind(band: band, kind: kind.code);
+
+  @override
+  void setEqBandFreq(int band, double hz) =>
+      rust.setEqBandFreq(band: band, hz: hz);
+
+  @override
+  void setEqBandQ(int band, double q) => rust.setEqBandQ(band: band, q: q);
+
+  @override
+  void setEqBandGainDb(int band, double db) =>
+      rust.setEqBandGainDb(band: band, db: db);
+
+  @override
+  void setEqBandEnabled(int band, bool on) =>
+      rust.setEqBandEnabled(band: band, on_: on);
+
+  @override
+  double get engineSampleRate => rust.engineSampleRate();
+
+  @override
   bool get isRunning => rust.isRunning();
 
   /// Cached so repeated reads don't each spawn a Rust-side pump thread.

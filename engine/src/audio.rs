@@ -198,6 +198,41 @@ impl Engine {
         let _ = self.commands.push(Command::SetPan(pan));
     }
 
+    /// Set EQ band `n`'s filter kind, by integer code (see
+    /// [`crate::dsp::FilterKind::from_code`]). Forwarded as a `u8` over the
+    /// command ring (which therefore carries no `dsp` type); the strip maps it to
+    /// a `FilterKind`. Fire-and-forget.
+    pub fn set_eq_band_kind(&mut self, n: u8, code: u32) {
+        let _ = self.commands.push(Command::SetEqBandKind(n, code as u8));
+    }
+
+    /// Set EQ band `n`'s frequency, Hz. Fire-and-forget; smoothed on the audio thread.
+    pub fn set_eq_band_freq(&mut self, n: u8, hz: f32) {
+        let _ = self.commands.push(Command::SetEqBandFreq(n, hz));
+    }
+
+    /// Set EQ band `n`'s Q. Fire-and-forget; smoothed on the audio thread.
+    pub fn set_eq_band_q(&mut self, n: u8, q: f32) {
+        let _ = self.commands.push(Command::SetEqBandQ(n, q));
+    }
+
+    /// Set EQ band `n`'s gain, dB. Fire-and-forget; smoothed on the audio thread.
+    pub fn set_eq_band_gain_db(&mut self, n: u8, db: f32) {
+        let _ = self.commands.push(Command::SetEqBandGainDb(n, db));
+    }
+
+    /// Enable/disable EQ band `n`. Fire-and-forget.
+    pub fn set_eq_band_enabled(&mut self, n: u8, on: bool) {
+        let _ = self.commands.push(Command::SetEqBandEnabled(n, on));
+    }
+
+    /// The output device sample rate (Hz) the engine is running at. The UI needs
+    /// it to draw the EQ's frequency response at the same rate the audio thread
+    /// filters with.
+    pub fn sample_rate(&self) -> f32 {
+        self.device_rate
+    }
+
     /// Latest post-fader peak levels `(left, right)`, linear (0..≈1, can exceed
     /// 1 if boosted), as published by the audio thread.
     pub fn peak_levels(&self) -> (f32, f32) {

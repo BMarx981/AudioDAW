@@ -35,10 +35,14 @@
 //! phase-coherent). That per-sample glide is what turns a knob drag into a smooth
 //! fade instead of a staircase. See [`smooth`].
 
+mod biquad;
+mod eq;
 mod gain;
 mod pan;
 mod smooth;
 
+pub use biquad::FilterKind;
+pub use eq::Eq;
 pub use gain::Gain;
 pub use pan::Pan;
 pub use smooth::SmoothedParam;

@@ -110,9 +110,16 @@ impl WavPlayer {
                 }
             }
             Command::SetLooping(on) => self.looping = on,
-            // Gain/pan commands are not the player's concern; the owning strip
+            // Gain/pan/EQ commands are not the player's concern; the owning strip
             // routes those to the DSP units. Ignored here.
-            Command::SetGainDb(_) | Command::SetGainLinear(_) | Command::SetPan(_) => {}
+            Command::SetGainDb(_)
+            | Command::SetGainLinear(_)
+            | Command::SetPan(_)
+            | Command::SetEqBandKind(_, _)
+            | Command::SetEqBandFreq(_, _)
+            | Command::SetEqBandQ(_, _)
+            | Command::SetEqBandGainDb(_, _)
+            | Command::SetEqBandEnabled(_, _) => {}
         }
     }
 

@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1412595635;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1894306845;
 
 // Section: executor
 
@@ -46,6 +46,35 @@ flutter_rust_bridge::frb_generated_default_handler!();
 
 // Section: wire_funcs
 
+fn wire__crate__api__engine_api__engine_sample_rate_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "engine_sample_rate",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::engine_api::engine_sample_rate())?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__engine_api__init_app_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -344,6 +373,171 @@ fn wire__crate__api__engine_api__seek_impl(
             transform_result_sse::<_, ()>((move || {
                 let output_ok = Result::<_, ()>::Ok({
                     crate::api::engine_api::seek(api_secs);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__engine_api__set_eq_band_enabled_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_eq_band_enabled",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_band = <u32>::sse_decode(&mut deserializer);
+            let api_on = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine_api::set_eq_band_enabled(api_band, api_on);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__engine_api__set_eq_band_freq_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_eq_band_freq",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_band = <u32>::sse_decode(&mut deserializer);
+            let api_hz = <f32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine_api::set_eq_band_freq(api_band, api_hz);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__engine_api__set_eq_band_gain_db_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_eq_band_gain_db",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_band = <u32>::sse_decode(&mut deserializer);
+            let api_db = <f32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine_api::set_eq_band_gain_db(api_band, api_db);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__engine_api__set_eq_band_kind_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_eq_band_kind",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_band = <u32>::sse_decode(&mut deserializer);
+            let api_kind = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine_api::set_eq_band_kind(api_band, api_kind);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__engine_api__set_eq_band_q_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_eq_band_q",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_band = <u32>::sse_decode(&mut deserializer);
+            let api_q = <f32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine_api::set_eq_band_q(api_band, api_q);
                 })?;
                 Ok(output_ok)
             })())
@@ -693,16 +887,16 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__engine_api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__engine_api__load_wav_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__engine_api__meter_stream_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__engine_api__playback_status_stream_impl(
+        2 => wire__crate__api__engine_api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__engine_api__load_wav_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__engine_api__meter_stream_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__engine_api__playback_status_stream_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        8 => wire__crate__api__engine_api__scope_stream_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__engine_api__scope_stream_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -715,15 +909,21 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        2 => wire__crate__api__engine_api__is_running_impl(ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__engine_api__pause_impl(ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__engine_api__play_impl(ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__engine_api__seek_impl(ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__engine_api__set_gain_db_impl(ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__engine_api__set_gain_linear_impl(ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__engine_api__set_looping_impl(ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__engine_api__set_pan_impl(ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__engine_api__stop_impl(ptr, rust_vec_len, data_len),
+        1 => wire__crate__api__engine_api__engine_sample_rate_impl(ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__engine_api__is_running_impl(ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__engine_api__pause_impl(ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__engine_api__play_impl(ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__engine_api__seek_impl(ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__engine_api__set_eq_band_enabled_impl(ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__engine_api__set_eq_band_freq_impl(ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__engine_api__set_eq_band_gain_db_impl(ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__engine_api__set_eq_band_kind_impl(ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__engine_api__set_eq_band_q_impl(ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__engine_api__set_gain_db_impl(ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__engine_api__set_gain_linear_impl(ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__engine_api__set_looping_impl(ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__engine_api__set_pan_impl(ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__engine_api__stop_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

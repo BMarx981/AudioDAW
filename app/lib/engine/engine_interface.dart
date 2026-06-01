@@ -41,6 +41,26 @@ abstract class EngineInterface {
   /// Fire-and-forget; clamped and smoothed by the engine.
   void setPan(double pan);
 
+  /// Set EQ band [band]'s filter kind. Fire-and-forget.
+  void setEqBandKind(int band, EqFilterKind kind);
+
+  /// Set EQ band [band]'s center/corner frequency in Hz. Fire-and-forget; safe
+  /// on every knob tick — smoothed by the engine, so a sweep is click-free.
+  void setEqBandFreq(int band, double hz);
+
+  /// Set EQ band [band]'s Q (bandwidth). Fire-and-forget; smoothed.
+  void setEqBandQ(int band, double q);
+
+  /// Set EQ band [band]'s gain in dB (peak/shelf kinds). Fire-and-forget; smoothed.
+  void setEqBandGainDb(int band, double db);
+
+  /// Enable/disable EQ band [band] (true bypass when off). Fire-and-forget.
+  void setEqBandEnabled(int band, bool on);
+
+  /// The engine's output sample rate (Hz). The EQ response curve is drawn at
+  /// this rate so it matches what the audio thread actually filters with.
+  double get engineSampleRate;
+
   /// Whether the audio engine is running (device open).
   bool get isRunning;
 
@@ -90,6 +110,34 @@ class PlaybackState {
   final bool playing;
 
   static const stopped = PlaybackState(positionSecs: 0, playing: false);
+}
+
+/// The biquad filter shapes an EQ band can take. A UI-side mirror of the
+/// engine's `FilterKind`, kept here so the UI and tests never import generated
+/// bridge code. [RustEngine] maps it to the bridge enum.
+enum EqFilterKind {
+  peak(0, 'Bell'),
+  lowShelf(1, 'Lo Shelf'),
+  highShelf(2, 'Hi Shelf'),
+  lowpass(3, 'Lo Pass'),
+  highpass(4, 'Hi Pass'),
+  bandpass(5, 'Band'),
+  notch(6, 'Notch');
+
+  const EqFilterKind(this.code, this.label);
+
+  /// Wire code matching the engine's `filter_kind_from_code` mapping.
+  final int code;
+
+  /// Short label for a dropdown.
+  final String label;
+
+  /// Whether this kind uses the gain parameter (peak and shelves do; the pass
+  /// filters and notch don't).
+  bool get usesGain =>
+      this == EqFilterKind.peak ||
+      this == EqFilterKind.lowShelf ||
+      this == EqFilterKind.highShelf;
 }
 
 /// Post-fader peak levels per channel, linear (0..≈1, may exceed 1 if boosted).

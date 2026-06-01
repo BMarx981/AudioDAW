@@ -16,6 +16,7 @@ class FakeEngine implements EngineInterface {
   final List<double> gainDbs = [];
   final List<double> gainLinears = [];
   final List<double> pans = [];
+  final List<String> eqCalls = [];
   bool _running = false;
 
   /// If set, [loadWav] throws this — used to test the error path.
@@ -63,6 +64,25 @@ class FakeEngine implements EngineInterface {
 
   @override
   void setPan(double pan) => pans.add(pan);
+
+  @override
+  void setEqBandKind(int band, EqFilterKind kind) =>
+      eqCalls.add('kind:$band:${kind.name}');
+
+  @override
+  void setEqBandFreq(int band, double hz) => eqCalls.add('freq:$band:$hz');
+
+  @override
+  void setEqBandQ(int band, double q) => eqCalls.add('q:$band:$q');
+
+  @override
+  void setEqBandGainDb(int band, double db) => eqCalls.add('gain:$band:$db');
+
+  @override
+  void setEqBandEnabled(int band, bool on) => eqCalls.add('enabled:$band:$on');
+
+  @override
+  double get engineSampleRate => 48000;
 
   @override
   bool get isRunning => _running;
