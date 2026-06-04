@@ -167,15 +167,78 @@ impl Engine {
         }
     }
 
-    /// Hand a freshly-decoded clip to the audio thread for `track`. Fire-and-
-    /// forget: pushes the clip + track index onto the hand-off ring and returns.
-    /// We first reclaim any retired clips so their memory is freed here, on the
-    /// control thread. Loading a clip stops the (global) transport so the new
-    /// file doesn't blast out mid-playback.
+    /// Hand a freshly-decoded clip to the audio thread for `track` — the
+    /// M5-compatible "just load this WAV on this track" path. Places the clip
+    /// in **slot 0** at start_frame 0 for its full length; identical to what
+    /// Milestones 1–5 did. Stops the transport (so the new file doesn't blast
+    /// out mid-playback) and rewinds. Fire-and-forget.
+    ///
+    /// New callers that want explicit timeline placement should use
+    /// [`Self::place_clip`] — it leaves the transport alone and lets the UI
+    /// add clips while playing.
     pub fn load_clip(&mut self, track: u8, clip: Arc<AudioClip>) {
         self.collect_garbage();
         let _ = self.commands.push(Command::Stop); // rewind every track
-        let _ = self.clips.push(TrackedClip { track, clip });
+        let frames = clip.frames as u32;
+        let _ = self.clips.push(TrackedClip {
+            track,
+            slot: 0,
+            clip,
+            start_frame: 0,
+            length_frames: frames,
+            source_offset_frames: 0,
+        });
+    }
+
+    /// Place a clip in a specific `(track, slot)` at a specific timeline
+    /// position. Does **not** touch the transport — call this while playing
+    /// and the new clip will start contributing as soon as the playhead
+    /// crosses its `start_frame`. Fire-and-forget.
+    pub fn place_clip(
+        &mut self,
+        track: u8,
+        slot: u8,
+        clip: Arc<AudioClip>,
+        start_frame: i64,
+        length_frames: u32,
+        source_offset_frames: u32,
+    ) {
+        self.collect_garbage();
+        let _ = self.clips.push(TrackedClip {
+            track,
+            slot,
+            clip,
+            start_frame,
+            length_frames,
+            source_offset_frames,
+        });
+    }
+
+    /// Move a placed clip on the timeline. Fire-and-forget.
+    pub fn move_clip(&mut self, track: u8, slot: u8, start_frame: i64) {
+        let _ = self.commands.push(Command::MoveClip(track, slot, start_frame));
+    }
+
+    /// Change a placed clip's length on the timeline. Fire-and-forget.
+    pub fn resize_clip(&mut self, track: u8, slot: u8, length_frames: u32) {
+        let _ = self
+            .commands
+            .push(Command::ResizeClip(track, slot, length_frames));
+    }
+
+    /// Shift where in the source a placed clip begins reading. Fire-and-forget.
+    pub fn set_clip_source_offset(&mut self, track: u8, slot: u8, offset_frames: u32) {
+        let _ = self
+            .commands
+            .push(Command::SetClipSourceOffset(track, slot, offset_frames));
+    }
+
+    /// Remove one placed clip from a track. The displaced clip rides the
+    /// retirement ring back to the control thread for safe disposal.
+    /// Fire-and-forget.
+    pub fn remove_clip(&mut self, track: u8, slot: u8) {
+        self.collect_garbage();
+        let _ = self.commands.push(Command::RemoveClip(track, slot));
     }
 
     /// Ask the audio thread to drop the clip on `track` and reset its strip to
@@ -503,33 +566,47 @@ fn audio_callback(
     master_peak_r: &AtomicU32,
 ) {
     // 1. Apply any pending commands, in order. The mixer routes most of them to
-    //    the right strip; `ClearTrack` is special-cased because it produces a
-    //    displaced clip that must be shipped to the retirement ring (the mixer
-    //    has no handle on that ring).
+    //    the right strip; `ClearTrack` and `RemoveClip` are special-cased
+    //    because they produce a displaced clip that must be shipped to the
+    //    retirement ring (the mixer has no handle on that ring).
     while let Ok(cmd) = command_rx.pop() {
-        if let Command::ClearTrack(t) = cmd {
-            if let Some(old) = mixer.clear_track(t) {
-                if let Err(rtrb::PushError::Full(old)) = retire_tx.push(old) {
-                    // Pathological: control thread hasn't drained in a long time.
-                    // Leaking is realtime-safe (no deallocation); dropping here
-                    // would not be. Matched ring capacities make this never fire.
-                    std::mem::forget(old);
+        match cmd {
+            Command::ClearTrack(t) => {
+                if let Some(old) = mixer.clear_track(t) {
+                    if let Err(rtrb::PushError::Full(old)) = retire_tx.push(old) {
+                        // Pathological: control thread hasn't drained in a long
+                        // time. Leaking is realtime-safe (no deallocation);
+                        // dropping here would not be. With matched ring
+                        // capacities this never fires.
+                        std::mem::forget(old);
+                    }
                 }
             }
-        } else {
-            mixer.handle(cmd);
+            Command::RemoveClip(t, slot) => {
+                if let Some(old) = mixer.remove_clip(t, slot) {
+                    if let Err(rtrb::PushError::Full(old)) = retire_tx.push(old) {
+                        std::mem::forget(old);
+                    }
+                }
+            }
+            other => mixer.handle(other),
         }
     }
 
     // 2. Swap in any newly-loaded clips. The clip we displace must NOT be dropped
     //    here (that would free memory on the audio thread); ship it back through
-    //    the retirement ring for the control thread to drop.
+    //    the retirement ring for the control thread to drop. The hand-off ring
+    //    carries the full placement (track + slot + start/length/source-offset),
+    //    so we reconstruct the `TimelineClip` here and call `place_clip`.
     while let Ok(t) = clip_rx.pop() {
-        if let Some(old) = mixer.set_clip(t.track, t.clip) {
+        let tc = crate::sampler::TimelineClip {
+            clip: t.clip,
+            start_frame: t.start_frame,
+            length_frames: t.length_frames,
+            source_offset_frames: t.source_offset_frames,
+        };
+        if let Some(old) = mixer.place_clip(t.track, t.slot, tc) {
             if let Err(rtrb::PushError::Full(old)) = retire_tx.push(old) {
-                // Pathological: the control thread hasn't drained in a long time.
-                // Leaking is realtime-safe (no deallocation); dropping here would
-                // not be. With matched ring capacities this never happens.
                 std::mem::forget(old);
             }
         }
@@ -580,7 +657,15 @@ mod tests {
         let clip = Arc::new(
             AudioClip::new(44_100.0, vec![vec![0.1; 20_000], vec![-0.1; 20_000]]).unwrap(),
         );
-        let _ = clip_tx.push(TrackedClip { track: 0, clip });
+        let frames = clip.frames as u32;
+        let _ = clip_tx.push(TrackedClip {
+            track: 0,
+            slot: 0,
+            clip,
+            start_frame: 0,
+            length_frames: frames,
+            source_offset_frames: 0,
+        });
 
         for i in 0..1000 {
             // Push commands from the "control" side, outside the guard — cover

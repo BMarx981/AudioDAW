@@ -47,8 +47,8 @@ class EqBandState {
           enabled == other.enabled;
 }
 
-/// Master bus state. Same shape as a track minus identity and clip — the master
-/// has its own EQ even though Milestone 4's UI doesn't expose it, so the
+/// Master bus state. Same shape as a track minus identity and clips — the
+/// master has its own EQ even though Milestone 4's UI doesn't expose it, so the
 /// project file is forward-compatible with a future "master EQ" pane.
 class MasterState {
   final double gainDb;
@@ -86,6 +86,11 @@ class ProjectFile {
   /// Human-readable project name. Used in the title bar; not constrained.
   final String name;
 
+  /// Project tempo in BPM, used by the timeline UI to snap clip placements to
+  /// bars/beats. The engine itself is tempo-agnostic — all timing on the
+  /// audio thread is in device frames — so this is a UI/data concern.
+  final double tempoBpm;
+
   /// One entry per user-visible track, in display order. Each entry's slot in
   /// the engine's strip pool is the track's index in this list — adding a
   /// track appends here, removing a track takes that index out and shifts the
@@ -98,6 +103,7 @@ class ProjectFile {
   const ProjectFile({
     required this.formatVersion,
     required this.name,
+    required this.tempoBpm,
     required this.tracks,
     required this.master,
   });
@@ -106,6 +112,7 @@ class ProjectFile {
   int get hashCode =>
       formatVersion.hashCode ^
       name.hashCode ^
+      tempoBpm.hashCode ^
       tracks.hashCode ^
       master.hashCode;
 
@@ -116,21 +123,73 @@ class ProjectFile {
           runtimeType == other.runtimeType &&
           formatVersion == other.formatVersion &&
           name == other.name &&
+          tempoBpm == other.tempoBpm &&
           tracks == other.tracks &&
           master == other.master;
 }
 
-/// One track's persistent state: identity, the WAV (if any) it loads, and the
-/// parameters of its processing chain.
+/// One clip placed on a track's timeline. The shape mirrors
+/// [`crate::sampler::TimelineClip`] minus the live `Arc<AudioClip>` — on save we
+/// persist the source file path; on load the Dart side re-decodes each path
+/// (best-effort) and pushes a `place_clip` call to put it back on the timeline.
+class TrackClipState {
+  /// Absolute (or workspace-relative — Dart's choice) path to the source WAV.
+  /// On load, missing files surface in the UI as a broken-link clip; the rest
+  /// of the project still opens.
+  final String path;
+
+  /// Position on the project timeline (device frames at the project's working
+  /// sample rate) where this placement starts. Signed so a future "negative"
+  /// placement is representable.
+  final PlatformInt64 startFrame;
+
+  /// Length on the timeline in device frames. `0` is the sentinel "use the
+  /// source's full frame count" — keeps the JSON terse for the common case of
+  /// dropping a whole WAV and not trimming it.
+  final int lengthFrames;
+
+  /// Where in the source to begin reading, in source-rate frames. Lets a
+  /// trimmed-from-the-head clip persist without re-encoding the WAV.
+  final int sourceOffsetFrames;
+
+  const TrackClipState({
+    required this.path,
+    required this.startFrame,
+    required this.lengthFrames,
+    required this.sourceOffsetFrames,
+  });
+
+  @override
+  int get hashCode =>
+      path.hashCode ^
+      startFrame.hashCode ^
+      lengthFrames.hashCode ^
+      sourceOffsetFrames.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TrackClipState &&
+          runtimeType == other.runtimeType &&
+          path == other.path &&
+          startFrame == other.startFrame &&
+          lengthFrames == other.lengthFrames &&
+          sourceOffsetFrames == other.sourceOffsetFrames;
+}
+
+/// One track's persistent state: identity, the clips placed on its timeline,
+/// and the parameters of its processing chain.
 class TrackState {
   /// User-facing label ("Track 1", "Kick", …). The UI may auto-fill this on
   /// creation; serializing it lets a renamed track keep its name across loads.
   final String name;
 
-  /// Absolute (or workspace-relative — Dart's choice) path to the WAV the
-  /// track was last loaded with. `None` for an empty track. On load, missing
-  /// files surface in the UI (the rest of the project still opens).
-  final String? clipPath;
+  /// Clips placed on this track's timeline. Order matches the engine's clip
+  /// slot indices (`clips[i]` lands in sampler slot `i`), so the file's
+  /// order is the source of truth for slot assignment. An empty list is a
+  /// silent track. The list length is capped by the engine's
+  /// `MAX_CLIPS_PER_TRACK`; the Dart side enforces that bound.
+  final List<TrackClipState> clips;
 
   /// Track fader gain in decibels.
   final double gainDb;
@@ -145,7 +204,7 @@ class TrackState {
 
   const TrackState({
     required this.name,
-    this.clipPath,
+    required this.clips,
     required this.gainDb,
     required this.pan,
     required this.eqBands,
@@ -154,7 +213,7 @@ class TrackState {
   @override
   int get hashCode =>
       name.hashCode ^
-      clipPath.hashCode ^
+      clips.hashCode ^
       gainDb.hashCode ^
       pan.hashCode ^
       eqBands.hashCode;
@@ -165,7 +224,7 @@ class TrackState {
       other is TrackState &&
           runtimeType == other.runtimeType &&
           name == other.name &&
-          clipPath == other.clipPath &&
+          clips == other.clips &&
           gainDb == other.gainDb &&
           pan == other.pan &&
           eqBands == other.eqBands;

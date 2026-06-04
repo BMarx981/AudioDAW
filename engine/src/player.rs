@@ -122,10 +122,18 @@ impl WavPlayer {
                 }
             }
             Command::SetLooping(on) => self.looping = on,
-            // Gain/pan/EQ commands (per-track or master), plus `ClearTrack`,
-            // are not the player's concern; the mixer (or, for `ClearTrack`,
-            // the audio callback) routes them. Ignored here.
+            // Gain/pan/EQ commands (per-track or master), the M5
+            // `ClearTrack`, and the M6 clip-placement commands are not the
+            // player's concern; the mixer (or, for `ClearTrack`/`RemoveClip`,
+            // the audio callback) routes them. Ignored here. (The whole
+            // `player` module is superseded by [`crate::sampler::Sampler`] in
+            // the live audio path; it's kept as the original M1 streaming
+            // source for reference and its own tests.)
             Command::ClearTrack(_)
+            | Command::RemoveClip(_, _)
+            | Command::MoveClip(..)
+            | Command::ResizeClip(..)
+            | Command::SetClipSourceOffset(..)
             | Command::SetTrackGainDb(..)
             | Command::SetTrackGainLinear(..)
             | Command::SetTrackPan(..)
@@ -237,13 +245,23 @@ impl WavPlayer {
 /// thread drains the retirement ring far faster than clips can pile up.
 const CLIP_RING_CAPACITY: usize = 16;
 
-/// A clip plus the track it is destined for. Crosses the control→audio boundary
-/// through the hand-off ring; the audio callback uses `track` to pick which
-/// strip's player gets the clip. Cheap to move (`u8` + `Arc`); the heavy
+/// A clip plus the track + slot it is destined for, with its full timeline
+/// placement. Crosses the control→audio boundary through the hand-off ring;
+/// the audio callback reads it as a [`crate::sampler::TimelineClip`] into the
+/// addressed slot. Cheap to move (`u8` + `Arc` + a few integers); the heavy
 /// `AudioClip` itself lives behind the `Arc` and is not copied.
+///
+/// M5-style "just load this WAV on this track" callers set `slot = 0`,
+/// `start_frame = 0`, `length_frames = clip.frames`, `source_offset_frames = 0`
+/// — that's exactly the single-clip-per-track behaviour Milestones 1–5 had.
+/// M6's timeline UI uses the other fields.
 pub struct TrackedClip {
     pub track: u8,
+    pub slot: u8,
     pub clip: Arc<AudioClip>,
+    pub start_frame: i64,
+    pub length_frames: u32,
+    pub source_offset_frames: u32,
 }
 
 /// Create the control→audio clip hand-off ring. The control thread pushes a
@@ -430,7 +448,15 @@ mod tests {
             for i in 0..1000 {
                 if i % 250 == 0 {
                     if let Some(c) = clip_iter.next() {
-                        let _ = clip_tx.push(TrackedClip { track: 0, clip: c });
+                        let frames = c.frames as u32;
+                        let _ = clip_tx.push(TrackedClip {
+                            track: 0,
+                            slot: 0,
+                            clip: c,
+                            start_frame: 0,
+                            length_frames: frames,
+                            source_offset_frames: 0,
+                        });
                     }
                 }
                 while let Ok(t) = clip_rx.pop() {

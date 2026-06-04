@@ -56,6 +56,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_f_64(dynamic raw);
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
   List<EqBandState> dco_decode_list_eq_band_state(dynamic raw);
 
   @protected
@@ -63,6 +66,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<TrackClipState> dco_decode_list_track_clip_state(dynamic raw);
 
   @protected
   List<TrackState> dco_decode_list_track_state(dynamic raw);
@@ -77,13 +83,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MixerMeters dco_decode_mixer_meters(dynamic raw);
 
   @protected
-  String? dco_decode_opt_String(dynamic raw);
-
-  @protected
   PlaybackStatus dco_decode_playback_status(dynamic raw);
 
   @protected
   ProjectFile dco_decode_project_file(dynamic raw);
+
+  @protected
+  TrackClipState dco_decode_track_clip_state(dynamic raw);
 
   @protected
   TrackState dco_decode_track_state(dynamic raw);
@@ -137,6 +143,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_f_64(SseDeserializer deserializer);
 
   @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
   List<EqBandState> sse_decode_list_eq_band_state(SseDeserializer deserializer);
 
   @protected
@@ -144,6 +153,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<TrackClipState> sse_decode_list_track_clip_state(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<TrackState> sse_decode_list_track_state(SseDeserializer deserializer);
@@ -158,13 +172,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MixerMeters sse_decode_mixer_meters(SseDeserializer deserializer);
 
   @protected
-  String? sse_decode_opt_String(SseDeserializer deserializer);
-
-  @protected
   PlaybackStatus sse_decode_playback_status(SseDeserializer deserializer);
 
   @protected
   ProjectFile sse_decode_project_file(SseDeserializer deserializer);
+
+  @protected
+  TrackClipState sse_decode_track_clip_state(SseDeserializer deserializer);
 
   @protected
   TrackState sse_decode_track_state(SseDeserializer deserializer);
@@ -230,6 +244,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_f_64(double self, SseSerializer serializer);
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_eq_band_state(
     List<EqBandState> self,
     SseSerializer serializer,
@@ -244,6 +261,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_track_clip_state(
+    List<TrackClipState> self,
     SseSerializer serializer,
   );
 
@@ -263,9 +286,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_mixer_meters(MixerMeters self, SseSerializer serializer);
 
   @protected
-  void sse_encode_opt_String(String? self, SseSerializer serializer);
-
-  @protected
   void sse_encode_playback_status(
     PlaybackStatus self,
     SseSerializer serializer,
@@ -273,6 +293,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_project_file(ProjectFile self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_track_clip_state(
+    TrackClipState self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_track_state(TrackState self, SseSerializer serializer);

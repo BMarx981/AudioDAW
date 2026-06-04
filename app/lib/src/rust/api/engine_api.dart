@@ -13,6 +13,11 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 /// state arrays without hard-coding the constant in two places.
 int maxTracks() => RustLib.instance.api.crateApiEngineApiMaxTracks();
 
+/// The per-track clip-slot pool size — the most timeline clips one track can
+/// hold simultaneously. Exposed for the same reason as [`max_tracks`].
+int maxClipsPerTrack() =>
+    RustLib.instance.api.crateApiEngineApiMaxClipsPerTrack();
+
 /// Load and decode a WAV from disk, hand it to `track` in the audio engine, and
 /// return its metadata + waveform summary. Starts the engine (opens the audio
 /// device) if it isn't already running. The clip loads stopped at the start —
@@ -126,6 +131,68 @@ void setMasterPan({required double pan}) =>
 /// audio thread. Used by the UI's "remove track" action.
 void clearTrack({required int track}) =>
     RustLib.instance.api.crateApiEngineApiClearTrack(track: track);
+
+/// Load + decode a WAV from disk and **place** it in `(track, slot)` at the
+/// given timeline position. Unlike [`load_wav`], does not stop the transport —
+/// the new clip starts contributing as soon as the playhead crosses
+/// `start_frame`. Async; throws a Dart exception if decode/file I/O fails.
+///
+/// `length_frames == 0` is interpreted as "use the source's full length", so
+/// the simplest Dart caller (drop a WAV on the timeline at frame N) can pass 0.
+Future<LoadedClip> placeClipOnTrack({
+  required int track,
+  required int slot,
+  required String path,
+  required PlatformInt64 startFrame,
+  required int lengthFrames,
+  required int sourceOffsetFrames,
+}) => RustLib.instance.api.crateApiEngineApiPlaceClipOnTrack(
+  track: track,
+  slot: slot,
+  path: path,
+  startFrame: startFrame,
+  lengthFrames: lengthFrames,
+  sourceOffsetFrames: sourceOffsetFrames,
+);
+
+/// Move an already-placed clip to a new timeline position. Fire-and-forget.
+void moveClip({
+  required int track,
+  required int slot,
+  required PlatformInt64 startFrame,
+}) => RustLib.instance.api.crateApiEngineApiMoveClip(
+  track: track,
+  slot: slot,
+  startFrame: startFrame,
+);
+
+/// Resize an already-placed clip on the timeline. Fire-and-forget.
+void resizeClip({
+  required int track,
+  required int slot,
+  required int lengthFrames,
+}) => RustLib.instance.api.crateApiEngineApiResizeClip(
+  track: track,
+  slot: slot,
+  lengthFrames: lengthFrames,
+);
+
+/// Shift where in the source an already-placed clip starts reading.
+/// Fire-and-forget.
+void setClipSourceOffset({
+  required int track,
+  required int slot,
+  required int sourceOffsetFrames,
+}) => RustLib.instance.api.crateApiEngineApiSetClipSourceOffset(
+  track: track,
+  slot: slot,
+  sourceOffsetFrames: sourceOffsetFrames,
+);
+
+/// Remove one placed clip from a track. The displaced source clip retires on
+/// the audio→control ring and is freed off the audio thread. Fire-and-forget.
+void removeClip({required int track, required int slot}) =>
+    RustLib.instance.api.crateApiEngineApiRemoveClip(track: track, slot: slot);
 
 /// Write `project` to `path` as JSON. Throws on the Dart side if the file
 /// can't be written (path doesn't exist, permission denied, etc.) — the

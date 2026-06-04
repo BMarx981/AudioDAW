@@ -23,11 +23,12 @@ use flutter_rust_bridge::frb;
 use crate::audio::Engine;
 use crate::frb_generated::StreamSink;
 use crate::mixer::MAX_TRACKS;
+use crate::sampler::MAX_CLIPS_PER_TRACK;
 // Re-export the project DTO types from the bridge module so flutter_rust_bridge
 // mirrors them to Dart classes. We don't *implement* serde here — that stays in
 // `crate::project` — but FRB only scans `crate::api`, so the public types it
 // needs must be reachable from this module's exports.
-pub use crate::project::{EqBandState, MasterState, ProjectFile, TrackState};
+pub use crate::project::{EqBandState, MasterState, ProjectFile, TrackClipState, TrackState};
 
 /// How often the pump threads sample the engine and push to Dart. ~60 Hz for the
 /// scope and meters (one tick per display frame) and a slightly calmer ~30 Hz
@@ -98,6 +99,13 @@ pub struct MixerMeters {
 #[frb(sync)]
 pub fn max_tracks() -> u32 {
     MAX_TRACKS as u32
+}
+
+/// The per-track clip-slot pool size — the most timeline clips one track can
+/// hold simultaneously. Exposed for the same reason as [`max_tracks`].
+#[frb(sync)]
+pub fn max_clips_per_track() -> u32 {
+    MAX_CLIPS_PER_TRACK as u32
 }
 
 /// Load and decode a WAV from disk, hand it to `track` in the audio engine, and
@@ -240,6 +248,110 @@ pub fn set_master_pan(pan: f32) {
 #[frb(sync)]
 pub fn clear_track(track: u32) {
     with_engine(|e| e.clear_track(track.min(u8::MAX as u32) as u8));
+}
+
+/// Load + decode a WAV from disk and **place** it in `(track, slot)` at the
+/// given timeline position. Unlike [`load_wav`], does not stop the transport —
+/// the new clip starts contributing as soon as the playhead crosses
+/// `start_frame`. Async; throws a Dart exception if decode/file I/O fails.
+///
+/// `length_frames == 0` is interpreted as "use the source's full length", so
+/// the simplest Dart caller (drop a WAV on the timeline at frame N) can pass 0.
+pub fn place_clip_on_track(
+    track: u32,
+    slot: u32,
+    path: String,
+    start_frame: i64,
+    length_frames: u32,
+    source_offset_frames: u32,
+) -> Result<LoadedClip, String> {
+    let clip = crate::decode::decode_wav(Path::new(&path))?;
+
+    let sample_rate = clip.sample_rate;
+    let channels = clip.channels as u32;
+    let frames = clip.frames as u64;
+    let duration_secs = clip.duration_secs();
+    let waveform = clip.waveform(WAVEFORM_BUCKETS);
+    // Resolve the convenience "0 = whole source" before moving the clip.
+    let effective_length = if length_frames == 0 {
+        clip.frames as u32
+    } else {
+        length_frames
+    };
+    let arc = Arc::new(clip);
+
+    let mut guard = lock()?;
+    if guard.is_none() {
+        *guard = Some(Engine::start()?);
+    }
+    if let Some(engine) = guard.as_mut() {
+        engine.place_clip(
+            track.min(u8::MAX as u32) as u8,
+            slot.min(u8::MAX as u32) as u8,
+            arc,
+            start_frame,
+            effective_length,
+            source_offset_frames,
+        );
+    }
+
+    Ok(LoadedClip {
+        sample_rate,
+        channels,
+        frames,
+        duration_secs,
+        waveform_min: waveform.min,
+        waveform_max: waveform.max,
+    })
+}
+
+/// Move an already-placed clip to a new timeline position. Fire-and-forget.
+#[frb(sync)]
+pub fn move_clip(track: u32, slot: u32, start_frame: i64) {
+    with_engine(|e| {
+        e.move_clip(
+            track.min(u8::MAX as u32) as u8,
+            slot.min(u8::MAX as u32) as u8,
+            start_frame,
+        )
+    });
+}
+
+/// Resize an already-placed clip on the timeline. Fire-and-forget.
+#[frb(sync)]
+pub fn resize_clip(track: u32, slot: u32, length_frames: u32) {
+    with_engine(|e| {
+        e.resize_clip(
+            track.min(u8::MAX as u32) as u8,
+            slot.min(u8::MAX as u32) as u8,
+            length_frames,
+        )
+    });
+}
+
+/// Shift where in the source an already-placed clip starts reading.
+/// Fire-and-forget.
+#[frb(sync)]
+pub fn set_clip_source_offset(track: u32, slot: u32, source_offset_frames: u32) {
+    with_engine(|e| {
+        e.set_clip_source_offset(
+            track.min(u8::MAX as u32) as u8,
+            slot.min(u8::MAX as u32) as u8,
+            source_offset_frames,
+        )
+    });
+}
+
+/// Remove one placed clip from a track. The displaced source clip retires on
+/// the audio→control ring and is freed off the audio thread. Fire-and-forget.
+#[frb(sync)]
+pub fn remove_clip(track: u32, slot: u32) {
+    with_engine(|e| {
+        e.remove_clip(
+            track.min(u8::MAX as u32) as u8,
+            slot.min(u8::MAX as u32) as u8,
+        )
+    });
 }
 
 /// Write `project` to `path` as JSON. Throws on the Dart side if the file

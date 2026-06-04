@@ -24,6 +24,7 @@ mod dsp;
 mod mixer;
 mod player;
 mod project;
+mod sampler;
 mod scope;
 mod strip;
 

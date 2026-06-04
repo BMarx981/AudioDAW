@@ -145,15 +145,31 @@ class RustEngine implements EngineInterface {
   rust_proj.ProjectFile _toBridge(Project p) => rust_proj.ProjectFile(
     // Always write the current schema; the Rust side ignores the field on
     // save and overwrites it, but supplying it keeps the type total.
-    formatVersion: 1,
+    formatVersion: 2,
     name: p.name,
+    // The UI doesn't expose a tempo control yet (M6 timeline lands its own UI
+    // later); persist a default so the v2 schema stays whole.
+    tempoBpm: 120.0,
     tracks: [for (final t in p.tracks) _trackToBridge(t)],
     master: _masterToBridge(p.master),
   );
 
   rust_proj.TrackState _trackToBridge(Track t) => rust_proj.TrackState(
     name: t.name,
-    clipPath: t.clipPath,
+    // Bridge mapping while the UI is still single-clip-per-track (M5 shape):
+    // a UI track with a clipPath becomes one slot-0 placement at frame 0 with
+    // length_frames = 0 (the "whole source" sentinel). Once the timeline UI
+    // lands, this expands to a real list.
+    clips: t.clipPath == null
+        ? const []
+        : [
+            rust_proj.TrackClipState(
+              path: t.clipPath!,
+              startFrame: 0,
+              lengthFrames: 0, // 0 = use the source's full length
+              sourceOffsetFrames: 0,
+            ),
+          ],
     gainDb: t.gainDb,
     pan: t.pan,
     eqBands: [for (final b in t.eqBands) _bandToBridge(b)],
@@ -181,7 +197,11 @@ class RustEngine implements EngineInterface {
 
   Track _trackFromBridge(rust_proj.TrackState t) => Track(
     name: t.name,
-    clipPath: t.clipPath,
+    // Inverse of the M5-shape mapping in `_trackToBridge`: collapse the v2
+    // clip list back to the UI's single optional clipPath until the timeline
+    // UI lands. Use the first slot's path if any (the slot every M5-style
+    // load_wav writes into).
+    clipPath: t.clips.isEmpty ? null : t.clips.first.path,
     gainDb: t.gainDb,
     pan: t.pan,
     eqBands: [for (final b in t.eqBands) _bandFromBridge(b)],

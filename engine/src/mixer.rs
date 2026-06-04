@@ -57,8 +57,21 @@ pub const MAX_TRACKS: usize = 8;
 /// track meters.
 const METER_RELEASE_SECS: f32 = 0.3;
 
-/// The summing mixer: a fixed pool of strips, a master chain, and the master
-/// meter atomics' worth of state. Owned by the audio callback.
+/// The summing mixer: a fixed pool of strips, a master chain, the **global
+/// transport** (playhead + playing flag), and the master meter atomics' worth
+/// of state. Owned by the audio callback.
+///
+/// ## Transport ownership (changed in Milestone 6)
+///
+/// In M5 each strip's [`crate::player::WavPlayer`] carried its own playhead and
+/// play/pause flag, and `Mixer::handle(Play|Pause|Stop|Seek)` broadcast the
+/// command to every strip. M6 moves transport to the mixer: a single
+/// [`Mixer::global_frame`] (device frames since project zero) and a single
+/// [`Mixer::playing`] flag drive every track in lockstep. Strips no longer
+/// have transport state; their [`Strip::render_into`] takes the global frame
+/// and an `advancing` flag from the mixer each block. This is what makes
+/// multi-clip timeline scheduling possible — every clip is placed at an
+/// absolute timeline position, and there's only one timeline.
 pub struct Mixer {
     pub(crate) strips: Vec<Strip>,
     /// The master processing chain (EQ → gain → pan). EQ isn't exposed by the
@@ -74,6 +87,14 @@ pub struct Mixer {
     /// Running post-master-fader peak per channel.
     master_peak_l: f32,
     master_peak_r: f32,
+    /// Output device sample rate, kept so [`Command::Seek`] can convert seconds
+    /// into device frames without a round-trip through the strips.
+    device_rate: f32,
+    /// Global playhead, in device frames since the project's zero point.
+    /// Advanced by [`Self::process`] when `playing == true`.
+    global_frame: i64,
+    /// Whether the transport is currently advancing.
+    playing: bool,
 }
 
 impl Mixer {
@@ -89,6 +110,9 @@ impl Mixer {
             master_meter_release: (-1.0 / (METER_RELEASE_SECS * device_rate)).exp(),
             master_peak_l: 0.0,
             master_peak_r: 0.0,
+            device_rate,
+            global_frame: 0,
+            playing: false,
         }
     }
 
@@ -98,9 +122,10 @@ impl Mixer {
         self.strips.len()
     }
 
-    /// Route one command to the right place — transport broadcasts to every
-    /// strip, per-track commands hit the addressed strip, master commands hit
-    /// the master chain. Realtime-safe; out-of-range indices are no-ops.
+    /// Route one command to the right place — transport updates the mixer-level
+    /// playhead/flag, per-track commands hit the addressed strip, master
+    /// commands hit the master chain. Realtime-safe; out-of-range indices are
+    /// no-ops.
     ///
     /// **Note:** `Command::ClearTrack` is **not** handled here — the audio
     /// callback special-cases it so it can ship the displaced clip to the
@@ -109,14 +134,47 @@ impl Mixer {
     #[inline]
     pub fn handle(&mut self, cmd: Command) {
         match cmd {
-            // Transport is global: one playhead, every player advances in lockstep.
-            Command::Play | Command::Pause | Command::Stop | Command::Seek(_) | Command::SetLooping(_) => {
-                for s in self.strips.iter_mut() {
-                    s.handle_transport(cmd);
-                }
+            // Transport now lives on the mixer (see the struct doc): one global
+            // playhead, no per-strip transport state.
+            Command::Play => self.playing = true,
+            Command::Pause => self.playing = false,
+            Command::Stop => {
+                self.playing = false;
+                self.global_frame = 0;
+            }
+            Command::Seek(secs) => {
+                // Clamp to [0, ∞) so a negative seek lands at 0 rather than
+                // confusing the placement math (which assumes the playhead is
+                // non-negative).
+                let target = (secs.max(0.0) as f64 * self.device_rate as f64) as i64;
+                self.global_frame = target.max(0);
+            }
+            Command::SetLooping(_) => {
+                // M5's per-clip looping doesn't translate to a multi-clip
+                // timeline; a future "loop region [a, b)" feature would live on
+                // the mixer here. No-op for now.
             }
             // Handled by the audio callback, not here — see the method doc.
-            Command::ClearTrack(_) => {}
+            // `RemoveClip` follows the same pattern (displaced clip must go to
+            // the retirement ring) and is also special-cased upstream.
+            Command::ClearTrack(_) | Command::RemoveClip(_, _) => {}
+            // Pure placement edits — no clip is displaced, so they don't need
+            // the retirement-ring detour. The mixer applies them directly.
+            Command::MoveClip(t, slot, start_frame) => {
+                if let Some(s) = self.strips.get_mut(t as usize) {
+                    s.move_clip(slot as usize, start_frame);
+                }
+            }
+            Command::ResizeClip(t, slot, length_frames) => {
+                if let Some(s) = self.strips.get_mut(t as usize) {
+                    s.resize_clip(slot as usize, length_frames);
+                }
+            }
+            Command::SetClipSourceOffset(t, slot, offset_frames) => {
+                if let Some(s) = self.strips.get_mut(t as usize) {
+                    s.set_clip_source_offset(slot as usize, offset_frames);
+                }
+            }
             Command::SetTrackGainDb(t, db) => {
                 if let Some(s) = self.strips.get_mut(t as usize) {
                     s.chain.set_gain_db(db);
@@ -163,12 +221,41 @@ impl Mixer {
         }
     }
 
-    /// Swap a new clip into track `t`. Returns the displaced clip (undropped —
-    /// the caller must dispose of it off the audio thread) or `None` if the
-    /// slot was empty or `t` is out of range.
+    /// M5-compatible single-clip load: place `clip` in **slot 0** of track `t`
+    /// at start_frame 0 for its full length. Returns the displaced source
+    /// `Arc` (undropped — the caller must dispose of it off the audio thread)
+    /// or `None` if the slot was empty or `t` is out of range. Realtime-safe.
+    ///
+    /// New code goes through [`Self::place_clip`] for slot-granular placement;
+    /// this method exists so the existing M5 load path keeps working unchanged.
     #[inline]
     pub fn set_clip(&mut self, t: u8, clip: Arc<AudioClip>) -> Option<Arc<AudioClip>> {
         self.strips.get_mut(t as usize).and_then(|s| s.set_clip(clip))
+    }
+
+    /// Place a [`TimelineClip`] in `(track, slot)`. Returns the displaced
+    /// source `Arc` (undropped) or `None` if the slot was empty or
+    /// `(track, slot)` is out of range. Realtime-safe.
+    #[inline]
+    pub fn place_clip(
+        &mut self,
+        track: u8,
+        slot: u8,
+        tc: crate::sampler::TimelineClip,
+    ) -> Option<Arc<AudioClip>> {
+        self.strips
+            .get_mut(track as usize)
+            .and_then(|s| s.place_clip(slot as usize, tc))
+    }
+
+    /// Remove one clip slot from a track. Returns the displaced source `Arc`
+    /// (undropped) for retirement. Realtime-safe. The strip's chain stays as
+    /// it is — only the slot is cleared. Out-of-range indices are no-ops.
+    #[inline]
+    pub fn remove_clip(&mut self, track: u8, slot: u8) -> Option<Arc<AudioClip>> {
+        self.strips
+            .get_mut(track as usize)
+            .and_then(|s| s.clear_clip(slot as usize))
     }
 
     /// Clear track `t`: drop its clip, reset its chain to defaults, zero its
@@ -180,21 +267,18 @@ impl Mixer {
         self.strips.get_mut(t as usize).and_then(|s| s.clear())
     }
 
-    /// Current playhead position in frames of the **first** strip — used by the
-    /// transport status stream. Every strip advances together (transport is
-    /// global), so any strip's position is representative; track 0 is the
-    /// canonical readout.
+    /// Current global playhead position in device frames since project zero.
+    /// Same number every strip is asked to render at; published to the UI.
+    /// Realtime-safe.
     #[inline]
     pub fn pos_frames(&self) -> i64 {
-        self.strips.first().map_or(0, |s| s.pos_frames())
+        self.global_frame
     }
 
-    /// Whether playback is advancing — true if any track is playing. (With a
-    /// global transport every loaded track plays together, but this is the
-    /// honest "is sound coming out?" answer if some tracks have no clip.)
+    /// Whether the transport is advancing. Realtime-safe.
     #[inline]
     pub fn is_playing(&self) -> bool {
-        self.strips.iter().any(|s| s.is_playing())
+        self.playing
     }
 
     /// Latest post-fader peak for the left channel of strip `t`, linear. Returns
@@ -260,8 +344,12 @@ impl Mixer {
 
         // 2. Sum every strip into the accumulator. Each strip updates its own
         //    post-fader meter as it goes; an empty strip just renders silence.
+        //    All strips are told the same global frame and the same `advancing`
+        //    flag — there's exactly one timeline in the project.
+        let global = self.global_frame;
+        let advancing = self.playing;
         for strip in self.strips.iter_mut() {
-            strip.render_into(mix_l, mix_r);
+            strip.render_into(global, advancing, mix_l, mix_r);
         }
 
         // 3. Master chain processes the sum in place (EQ → gain → pan).
@@ -296,6 +384,15 @@ impl Mixer {
 
             // Post-master mono mix to the scope (wait-free; full ring just drops).
             let _ = scope_tx.push((l + r) * 0.5);
+        }
+
+        // Advance the global playhead by the chunk we just rendered, but only
+        // when playing — pausing freezes the playhead at its current frame.
+        // `saturating_add` guards the i64 from overflow on absurdly long runs;
+        // in practice the playhead can run for ~6 million years before this
+        // matters, but the guard costs nothing.
+        if self.playing {
+            self.global_frame = self.global_frame.saturating_add(frames as i64);
         }
     }
 }
@@ -443,7 +540,132 @@ mod tests {
         mixer.handle(Command::SetTrackGainDb(99, -6.0));
         mixer.handle(Command::SetTrackPan(99, 1.0));
         mixer.handle(Command::SetTrackEqBandFreq(99, 0, 1000.0));
+        mixer.handle(Command::MoveClip(99, 0, 0));
+        mixer.handle(Command::RemoveClip(99, 99));
         assert!(mixer.set_clip(99, const_clip(0.1, 100)).is_none());
+        assert!(mixer
+            .place_clip(
+                99,
+                99,
+                crate::sampler::TimelineClip::whole(const_clip(0.1, 100), 0),
+            )
+            .is_none());
+        assert!(mixer.remove_clip(99, 99).is_none());
+    }
+
+    /// The M6 placement path end-to-end at the mixer level: place a clip via
+    /// `Mixer::place_clip` with a non-zero `start_frame`, advance the transport
+    /// with Play, render past the clip's start, hear it. Then `MoveClip` it
+    /// further out, render before its new position, expect silence. Then
+    /// `remove_clip` it and verify silence.
+    #[test]
+    fn place_move_remove_clip_through_the_transport() {
+        const FRAMES_PER_BLOCK: usize = 256;
+        let (mut scope_tx, _r) = scope_channel();
+        let mut mixer = Mixer::new(SR);
+
+        // A loud-enough constant clip placed on track 3, slot 5, starting at
+        // global frame 1000. Length covers ~2 s.
+        let clip = const_clip(0.6, 96_000);
+        let tc = crate::sampler::TimelineClip {
+            clip,
+            start_frame: 1000,
+            length_frames: 96_000,
+            source_offset_frames: 0,
+        };
+        assert!(mixer.place_clip(3, 5, tc).is_none());
+
+        // Start the transport. Render up to frame ~2000 (well past the clip's
+        // start_frame == 1000) — track 3 should be metering audio.
+        mixer.handle(Command::Play);
+        let mut data = vec![0.0_f32; FRAMES_PER_BLOCK * 2];
+        let blocks_to_pass_start = 1100_usize.div_ceil(FRAMES_PER_BLOCK);
+        for _ in 0..blocks_to_pass_start + 10 {
+            mixer.process(&mut data, 2, &mut scope_tx);
+        }
+        assert!(mixer.pos_frames() > 1000);
+        assert!(
+            mixer.track_peak_left(3) > 0.05,
+            "track 3 should meter once the playhead has passed clip start, got {}",
+            mixer.track_peak_left(3)
+        );
+
+        // Stop + rewind, then move the clip far out (start_frame = 1_000_000)
+        // and render a few blocks — track 3 should be silent (we're not even
+        // close to the clip's new placement).
+        mixer.handle(Command::Stop);
+        assert_eq!(mixer.pos_frames(), 0);
+        mixer.handle(Command::MoveClip(3, 5, 1_000_000));
+        mixer.handle(Command::Play);
+        // The meter is a 300 ms exponential release; from a peak of ~0.6 we
+        // need ≳ 4 time constants (~1.2 s) to drop under 0.01. At 256 frames
+        // per block / 48 kHz, that's ~225 blocks. We give a comfortable margin.
+        for _ in 0..600 {
+            mixer.process(&mut data, 2, &mut scope_tx);
+        }
+        assert!(
+            mixer.track_peak_left(3) < 0.01,
+            "moved-far-away clip should be silent, got {}",
+            mixer.track_peak_left(3)
+        );
+
+        // Move it back to a position the playhead is about to cross, then
+        // remove it and render — silence. We use the displaced-Arc Option that
+        // remove_clip returns to prove the retirement contract: the call
+        // actually returned the Arc rather than dropping it internally.
+        mixer.handle(Command::MoveClip(3, 5, mixer.pos_frames() + 100));
+        for _ in 0..2 {
+            mixer.process(&mut data, 2, &mut scope_tx);
+        }
+        let removed = mixer.remove_clip(3, 5);
+        assert!(removed.is_some(), "remove_clip must hand back the source Arc");
+        // Same release-time argument as above: wait > 4 time constants so the
+        // post-fader meter has time to drop near zero from its on-clip peak.
+        for _ in 0..600 {
+            mixer.process(&mut data, 2, &mut scope_tx);
+        }
+        assert!(
+            mixer.track_peak_left(3) < 0.01,
+            "removed clip should leave the track silent, got {}",
+            mixer.track_peak_left(3)
+        );
+    }
+
+    /// The M6 transport: Play advances `pos_frames` block-by-block, Pause
+    /// freezes it, Stop rewinds. This is the core "global playhead" contract.
+    #[test]
+    fn transport_advances_pauses_and_stops() {
+        let (mut scope_tx, _r) = scope_channel();
+        let mut mixer = Mixer::new(SR);
+        let mut data = vec![0.0_f32; 512];
+
+        // Stopped: no advance.
+        mixer.process(&mut data, 2, &mut scope_tx);
+        assert_eq!(mixer.pos_frames(), 0);
+
+        // Play: advances by `frames` per chunk.
+        mixer.handle(Command::Play);
+        mixer.process(&mut data, 2, &mut scope_tx);
+        assert_eq!(mixer.pos_frames(), 256, "one chunk of 256 frames");
+        mixer.process(&mut data, 2, &mut scope_tx);
+        assert_eq!(mixer.pos_frames(), 512);
+
+        // Pause: holds.
+        mixer.handle(Command::Pause);
+        mixer.process(&mut data, 2, &mut scope_tx);
+        assert_eq!(mixer.pos_frames(), 512, "pause must freeze the playhead");
+
+        // Stop: rewinds.
+        mixer.handle(Command::Stop);
+        assert_eq!(mixer.pos_frames(), 0);
+        assert!(!mixer.is_playing());
+
+        // Seek then play resumes from there.
+        mixer.handle(Command::Seek(1.0)); // 1 s = SR frames
+        assert_eq!(mixer.pos_frames(), SR as i64);
+        mixer.handle(Command::Play);
+        mixer.process(&mut data, 2, &mut scope_tx);
+        assert_eq!(mixer.pos_frames(), SR as i64 + 256);
     }
 
     /// The M5 dynamic-add/remove contract: calling `clear_track` repeatedly while

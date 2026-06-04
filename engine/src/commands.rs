@@ -56,7 +56,21 @@ pub enum Command {
     /// stays in the pool for reuse). The audio callback intercepts this one
     /// specially so the displaced clip can be shipped to the retirement ring
     /// — the strip itself never frees memory. See `audio.rs::audio_callback`.
+    /// Note: through Milestone 5 each strip only ever holds one clip in slot 0,
+    /// so this clears that slot; once the timeline UI places clips in arbitrary
+    /// slots, removing a single clip uses [`Command::RemoveClip`] instead.
     ClearTrack(u8),
+    /// Drop one specific clip slot on a track. Same retirement contract as
+    /// [`Command::ClearTrack`] — the audio callback ships the displaced source
+    /// `Arc` to the retirement ring. Out-of-range track or slot is a no-op.
+    RemoveClip(u8, u8),
+    /// Move a placed clip on the timeline. `(track, slot, start_frame)`.
+    MoveClip(u8, u8, i64),
+    /// Change a placed clip's length on the timeline. `(track, slot, length_frames)`.
+    ResizeClip(u8, u8, u32),
+    /// Shift where in the source a placed clip begins reading.
+    /// `(track, slot, source_offset_frames)`.
+    SetClipSourceOffset(u8, u8, u32),
     /// Set track `t`'s gain target, in decibels.
     SetTrackGainDb(u8, f32),
     /// Set track `t`'s gain target as a raw linear multiplier.
