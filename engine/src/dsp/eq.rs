@@ -257,10 +257,15 @@ mod tests {
             .collect()
     }
 
+    /// Level in dB of a buffer's steady-state tail, referenced so a
+    /// unit-amplitude (peak = 1.0) sine reads 0 dB. The +3.01 correction comes
+    /// from `RMS = peak/√2` for a sine: without it a unit sine would read
+    /// −3.01 dB and the "passthrough → 0 dB" assertions below would all be off
+    /// by that amount.
     fn rms_db_tail(buf: &[f32]) -> f32 {
         let tail = &buf[buf.len() / 2..];
         let ms = tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32;
-        10.0 * ms.max(1e-30).log10()
+        10.0 * ms.max(1e-30).log10() + 10.0 * 2.0_f32.log10()
     }
 
     /// Push a mono signal through the EQ (as a 1-channel block) and return it.

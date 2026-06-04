@@ -364,12 +364,19 @@ mod tests {
             .collect()
     }
 
-    /// RMS in dB of a buffer's steady-state tail (skips the filter's startup
-    /// transient so we measure the settled response).
+    /// Level in dB of a buffer's steady-state tail, **referenced so that a
+    /// unit-amplitude (peak = 1.0) sine reads 0 dB**. Skips the filter's startup
+    /// transient so we measure the settled response.
+    ///
+    /// Why the +3.01 correction: a sine's RMS is `peak/√2`, so `10·log10(MS)`
+    /// for a unit sine is −3.01 dB. The assertions in this module are written in
+    /// terms of "gain relative to the input tone" (passthrough = 0 dB,
+    /// +12 dB boost = +12 dB), so we lift the reading by +3.01 dB
+    /// (equivalently, `20·log10(rms·√2)`).
     fn rms_db_tail(buf: &[f32]) -> f32 {
         let tail = &buf[buf.len() / 2..];
         let ms = tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32;
-        10.0 * ms.max(1e-30).log10()
+        10.0 * ms.max(1e-30).log10() + 10.0 * 2.0_f32.log10()
     }
 
     /// Run a sine through a single-channel biquad and return the output.
