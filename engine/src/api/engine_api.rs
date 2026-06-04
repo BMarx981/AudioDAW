@@ -11,7 +11,8 @@
 //! gets a throwing `Future`). The transport calls (`play`/`pause`/`stop`/`seek`)
 //! are sync and fire-and-forget — they push one POD command to the lock-free
 //! ring and return, so the UI never awaits a transport tap. Continuous data
-//! (the scope trace, the playhead) arrives via streams, not polling.
+//! (the scope trace, the playhead, the per-track + master meters) arrives via
+//! streams, not polling.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -21,14 +22,18 @@ use flutter_rust_bridge::frb;
 
 use crate::audio::Engine;
 use crate::frb_generated::StreamSink;
+use crate::mixer::MAX_TRACKS;
+// Re-export the project DTO types from the bridge module so flutter_rust_bridge
+// mirrors them to Dart classes. We don't *implement* serde here — that stays in
+// `crate::project` — but FRB only scans `crate::api`, so the public types it
+// needs must be reachable from this module's exports.
+pub use crate::project::{EqBandState, MasterState, ProjectFile, TrackState};
 
 /// How often the pump threads sample the engine and push to Dart. ~60 Hz for the
-/// scope (one trace per display frame) and a slightly calmer ~30 Hz for the
-/// playhead, which doesn't need to update faster than the eye notices.
+/// scope and meters (one tick per display frame) and a slightly calmer ~30 Hz
+/// for the playhead, which doesn't need to update faster than the eye notices.
 const SCOPE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const STATUS_FRAME_INTERVAL: Duration = Duration::from_millis(33);
-/// Meters want a brisk update so transients read crisply — ~60 Hz, like the
-/// scope.
 const METER_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Number of min/max columns we summarize a clip's waveform into at load. Plenty
@@ -64,7 +69,8 @@ pub struct LoadedClip {
 }
 
 /// A snapshot of transport state for the UI to animate the playhead and reflect
-/// play/stop. Streamed ~30×/sec.
+/// play/stop. Transport is global — one playhead drives every track. Streamed
+/// ~30×/sec.
 pub struct PlaybackStatus {
     /// Current playhead position, seconds from the clip start.
     pub position_secs: f64,
@@ -72,22 +78,36 @@ pub struct PlaybackStatus {
     pub playing: bool,
 }
 
-/// Post-fader peak levels per channel, linear (0..≈1, and can exceed 1 if the
-/// gain is boosting). Streamed ~60×/sec — the first continuous audio→UI level
-/// stream. The UI maps these to its own dB-scaled meter.
-pub struct MeterLevels {
-    pub peak_left: f32,
-    pub peak_right: f32,
+/// One snapshot of every meter in the mixer: per-track L/R post-fader peaks
+/// (length [`max_tracks`]), plus the master bus L/R post-fader peak. All values
+/// are linear amplitude (0..≈1, may exceed 1 if boosted). The UI maps these to
+/// its own dB-scaled meter widgets.
+pub struct MixerMeters {
+    /// Per-track left-channel peaks, one entry per strip slot.
+    pub track_peaks_l: Vec<f32>,
+    /// Per-track right-channel peaks, same length as [`track_peaks_l`].
+    pub track_peaks_r: Vec<f32>,
+    /// Master bus left-channel peak.
+    pub master_peak_l: f32,
+    /// Master bus right-channel peak.
+    pub master_peak_r: f32,
 }
 
-/// Load and decode a WAV from disk, hand it to the audio engine, and return its
-/// metadata + waveform summary. Starts the engine (opens the audio device) if it
-/// isn't already running. The clip is loaded stopped at the start — call
-/// [`play`] to hear it.
+/// The mixer's track-pool size. Exposed so the Dart side can size per-track
+/// state arrays without hard-coding the constant in two places.
+#[frb(sync)]
+pub fn max_tracks() -> u32 {
+    MAX_TRACKS as u32
+}
+
+/// Load and decode a WAV from disk, hand it to `track` in the audio engine, and
+/// return its metadata + waveform summary. Starts the engine (opens the audio
+/// device) if it isn't already running. The clip loads stopped at the start —
+/// call [`play`] to hear it.
 ///
 /// Async on the Dart side (it does real file I/O and decoding); throws a Dart
 /// exception if the file can't be read or decoded.
-pub fn load_wav(path: String) -> Result<LoadedClip, String> {
+pub fn load_wav(track: u32, path: String) -> Result<LoadedClip, String> {
     // Decode first, holding no lock during the slow part.
     let clip = crate::decode::decode_wav(Path::new(&path))?;
 
@@ -105,7 +125,7 @@ pub fn load_wav(path: String) -> Result<LoadedClip, String> {
         *guard = Some(Engine::start()?);
     }
     if let Some(engine) = guard.as_mut() {
-        engine.load_clip(arc);
+        engine.load_clip(track.min(u8::MAX as u32) as u8, arc);
     }
 
     Ok(LoadedClip {
@@ -118,97 +138,124 @@ pub fn load_wav(path: String) -> Result<LoadedClip, String> {
     })
 }
 
-/// Begin or resume playback. Fire-and-forget; no-op if no clip is loaded.
+/// Begin or resume playback on every track. Fire-and-forget.
 #[frb(sync)]
 pub fn play() {
     with_engine(|e| e.play());
 }
 
-/// Pause playback, holding the current position. Fire-and-forget.
+/// Pause playback, holding the current position, on every track. Fire-and-forget.
 #[frb(sync)]
 pub fn pause() {
     with_engine(|e| e.pause());
 }
 
-/// Stop playback and rewind to the start. Fire-and-forget.
+/// Stop playback and rewind every track to the start. Fire-and-forget.
 #[frb(sync)]
 pub fn stop() {
     with_engine(|e| e.stop_playback());
 }
 
-/// Seek to `secs` from the clip start. Fire-and-forget; safe to call on every
-/// scrub tick (the engine clamps to the clip bounds).
+/// Seek every track to `secs` from its clip start. Fire-and-forget.
 #[frb(sync)]
 pub fn seek(secs: f32) {
     with_engine(|e| e.seek(secs));
 }
 
-/// Turn looping on/off. Fire-and-forget; when on, playback wraps to the start
-/// at the clip end instead of stopping.
+/// Turn looping on/off on every track. Fire-and-forget.
 #[frb(sync)]
 pub fn set_looping(looping: bool) {
     with_engine(|e| e.set_looping(looping));
 }
 
-/// Set the channel-strip gain, in decibels (UI-natural). Fire-and-forget; safe
-/// to call on every knob tick — the value is clamped and smoothed on the audio
-/// thread, so a drag produces a click-free fade.
+/// Set track `t`'s gain in dB. Fire-and-forget; clamped + smoothed on audio.
 #[frb(sync)]
-pub fn set_gain_db(db: f32) {
-    with_engine(|e| e.set_gain_db(db));
+pub fn set_track_gain_db(track: u32, db: f32) {
+    with_engine(|e| e.set_track_gain_db(track as u8, db));
 }
 
-/// Set the channel-strip gain as a raw linear multiplier (what the linear gain
-/// fader drives). Fire-and-forget; clamped and smoothed on the audio thread.
+/// Set track `t`'s gain as a raw linear multiplier. Fire-and-forget; clamped + smoothed.
 #[frb(sync)]
-pub fn set_gain_linear(linear: f32) {
-    with_engine(|e| e.set_gain_linear(linear));
+pub fn set_track_gain_linear(track: u32, linear: f32) {
+    with_engine(|e| e.set_track_gain_linear(track as u8, linear));
 }
 
-/// Set the channel-strip pan, in `[-1, 1]` (−1 = hard left, 0 = center, +1 =
-/// hard right). Fire-and-forget; clamped and smoothed on the audio thread.
+/// Set track `t`'s pan in `[-1, 1]`. Fire-and-forget; clamped + smoothed.
 #[frb(sync)]
-pub fn set_pan(pan: f32) {
-    with_engine(|e| e.set_pan(pan));
+pub fn set_track_pan(track: u32, pan: f32) {
+    with_engine(|e| e.set_track_pan(track as u8, pan));
 }
 
-/// Set EQ band `n`'s filter kind, by integer code (0=peak, 1=low-shelf,
-/// 2=high-shelf, 3=low-pass, 4=high-pass, 5=band-pass, 6=notch). We pass the kind
-/// as a small int rather than mirroring the engine's `FilterKind` enum across the
-/// bridge: that enum lives in `dsp::biquad` next to types (`Biquad`, `Eq`) that
-/// carry fixed-size arrays flutter_rust_bridge can't parse, so naming the enum
-/// anywhere the bridge scans drags those in and breaks codegen. The int→kind
-/// mapping happens inside the engine, which the bridge never scans.
-/// Fire-and-forget.
+/// Set track `t`'s EQ band filter kind, by integer code. Fire-and-forget.
 #[frb(sync)]
-pub fn set_eq_band_kind(band: u32, kind: u32) {
-    with_engine(|e| e.set_eq_band_kind(band as u8, kind));
+pub fn set_track_eq_band_kind(track: u32, band: u32, kind: u32) {
+    with_engine(|e| e.set_track_eq_band_kind(track as u8, band as u8, kind));
 }
 
-/// Set EQ band `n`'s center/corner frequency in Hz. Fire-and-forget; safe on
-/// every knob tick — the value is smoothed on the audio thread, so a sweep is
-/// click-free.
+/// Set track `t`'s EQ band frequency in Hz. Fire-and-forget; smoothed.
 #[frb(sync)]
-pub fn set_eq_band_freq(band: u32, hz: f32) {
-    with_engine(|e| e.set_eq_band_freq(band as u8, hz));
+pub fn set_track_eq_band_freq(track: u32, band: u32, hz: f32) {
+    with_engine(|e| e.set_track_eq_band_freq(track as u8, band as u8, hz));
 }
 
-/// Set EQ band `n`'s Q (bandwidth). Fire-and-forget; smoothed on the audio thread.
+/// Set track `t`'s EQ band Q. Fire-and-forget; smoothed.
 #[frb(sync)]
-pub fn set_eq_band_q(band: u32, q: f32) {
-    with_engine(|e| e.set_eq_band_q(band as u8, q));
+pub fn set_track_eq_band_q(track: u32, band: u32, q: f32) {
+    with_engine(|e| e.set_track_eq_band_q(track as u8, band as u8, q));
 }
 
-/// Set EQ band `n`'s gain in dB (peak/shelf kinds). Fire-and-forget; smoothed.
+/// Set track `t`'s EQ band gain in dB. Fire-and-forget; smoothed.
 #[frb(sync)]
-pub fn set_eq_band_gain_db(band: u32, db: f32) {
-    with_engine(|e| e.set_eq_band_gain_db(band as u8, db));
+pub fn set_track_eq_band_gain_db(track: u32, band: u32, db: f32) {
+    with_engine(|e| e.set_track_eq_band_gain_db(track as u8, band as u8, db));
 }
 
-/// Enable/disable EQ band `n` (true bypass when off). Fire-and-forget.
+/// Enable/disable track `t`'s EQ band. Fire-and-forget.
 #[frb(sync)]
-pub fn set_eq_band_enabled(band: u32, on: bool) {
-    with_engine(|e| e.set_eq_band_enabled(band as u8, on));
+pub fn set_track_eq_band_enabled(track: u32, band: u32, on: bool) {
+    with_engine(|e| e.set_track_eq_band_enabled(track as u8, band as u8, on));
+}
+
+/// Set the master bus gain in dB. Fire-and-forget; clamped + smoothed.
+#[frb(sync)]
+pub fn set_master_gain_db(db: f32) {
+    with_engine(|e| e.set_master_gain_db(db));
+}
+
+/// Set the master bus gain as a raw linear multiplier. Fire-and-forget.
+#[frb(sync)]
+pub fn set_master_gain_linear(linear: f32) {
+    with_engine(|e| e.set_master_gain_linear(linear));
+}
+
+/// Set the master bus pan in `[-1, 1]`. Fire-and-forget; clamped + smoothed.
+#[frb(sync)]
+pub fn set_master_pan(pan: f32) {
+    with_engine(|e| e.set_master_pan(pan));
+}
+
+/// Drop the clip on `track` and reset its strip to defaults. Fire-and-forget —
+/// the displaced clip retires on the audio→control ring and is freed off the
+/// audio thread. Used by the UI's "remove track" action.
+#[frb(sync)]
+pub fn clear_track(track: u32) {
+    with_engine(|e| e.clear_track(track.min(u8::MAX as u32) as u8));
+}
+
+/// Write `project` to `path` as JSON. Throws on the Dart side if the file
+/// can't be written (path doesn't exist, permission denied, etc.) — the
+/// Result→Future mapping turns the error string into a Dart exception. Runs
+/// off the audio thread (file I/O).
+pub fn save_project(path: String, project: ProjectFile) -> Result<(), String> {
+    crate::project::save_to_file(Path::new(&path), &project)
+}
+
+/// Read a project from `path`. Returns the DTO; the Dart side then loads each
+/// referenced WAV (best-effort) and pushes parameter setters to bring the
+/// engine into sync. Throws on the Dart side if the file is missing, malformed,
+/// or claims a newer schema than this build supports. Runs off the audio thread.
+pub fn load_project(path: String) -> Result<ProjectFile, String> {
+    crate::project::load_from_file(Path::new(&path))
 }
 
 /// The output sample rate (Hz) the engine is running at, or 48000 if it hasn't
@@ -232,7 +279,7 @@ pub fn is_running() -> bool {
 
 /// Stream of oscilloscope frames for the UI to draw. Each item is one
 /// trigger-aligned window of mono samples (`Float32List` in Dart) — now the live
-/// output of the WAV player. Subscribe once; the stream stays live for the app's
+/// output of the master mix. Subscribe once; the stream stays live for the app's
 /// lifetime, emitting an empty frame while stopped and real audio while playing.
 ///
 /// The audio callback only ever *pushes* samples into a lock-free ring; this
@@ -328,15 +375,14 @@ pub fn playback_status_stream(sink: StreamSink<PlaybackStatus>) {
         });
 }
 
-/// Stream of post-fader [`MeterLevels`] (~60 Hz) — the first continuous
-/// audio→UI level stream. The audio thread maintains a peak-hold-with-decay per
-/// channel and publishes it to atomics each buffer; this pump reads those
-/// atomics and hands them to Dart. Emits zeros while the engine is stopped.
+/// Stream of post-fader [`MixerMeters`] (~60 Hz). Each event carries the peak
+/// L/R for every track in the pool plus the master bus, so the UI can drive a
+/// per-strip meter from one subscription.
 ///
 /// As with the other pumps, nothing here runs on or blocks the audio thread —
 /// reading an atomic is wait-free, and the lock taken is the control-side engine
 /// mutex (never touched by the realtime callback).
-pub fn meter_stream(sink: StreamSink<MeterLevels>) {
+pub fn meter_stream(sink: StreamSink<MixerMeters>) {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static PUMP_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -356,26 +402,39 @@ pub fn meter_stream(sink: StreamSink<MeterLevels>) {
             let _guard = Guard;
 
             loop {
-                let levels = match ENGINE.lock() {
+                let meters = match ENGINE.lock() {
                     Ok(guard) => match guard.as_ref() {
                         Some(engine) => {
-                            let (l, r) = engine.peak_levels();
-                            MeterLevels {
-                                peak_left: l,
-                                peak_right: r,
+                            let mut l = Vec::with_capacity(MAX_TRACKS);
+                            let mut r = Vec::with_capacity(MAX_TRACKS);
+                            for t in 0..MAX_TRACKS {
+                                let (tl, tr) = engine.track_peak_levels(t);
+                                l.push(tl);
+                                r.push(tr);
+                            }
+                            let (ml, mr) = engine.master_peak_levels();
+                            MixerMeters {
+                                track_peaks_l: l,
+                                track_peaks_r: r,
+                                master_peak_l: ml,
+                                master_peak_r: mr,
                             }
                         }
-                        None => MeterLevels {
-                            peak_left: 0.0,
-                            peak_right: 0.0,
+                        None => MixerMeters {
+                            track_peaks_l: vec![0.0; MAX_TRACKS],
+                            track_peaks_r: vec![0.0; MAX_TRACKS],
+                            master_peak_l: 0.0,
+                            master_peak_r: 0.0,
                         },
                     },
-                    Err(_) => MeterLevels {
-                        peak_left: 0.0,
-                        peak_right: 0.0,
+                    Err(_) => MixerMeters {
+                        track_peaks_l: vec![0.0; MAX_TRACKS],
+                        track_peaks_r: vec![0.0; MAX_TRACKS],
+                        master_peak_l: 0.0,
+                        master_peak_r: 0.0,
                     },
                 };
-                if sink.add(levels).is_err() {
+                if sink.add(meters).is_err() {
                     break;
                 }
                 std::thread::sleep(METER_FRAME_INTERVAL);

@@ -4,72 +4,11 @@ import 'package:flutter/material.dart';
 
 import '../engine/engine_interface.dart';
 
-/// One EQ band's settings, as the UI holds them (the UI-rate values). The engine
-/// keeps its own smoothed audio-rate copy; this is the source of truth for the
-/// controls and the drawn response curve.
-class EqBand {
-  const EqBand({
-    required this.kind,
-    required this.freqHz,
-    required this.q,
-    required this.gainDb,
-    required this.enabled,
-  });
-
-  final EqFilterKind kind;
-  final double freqHz;
-  final double q;
-  final double gainDb;
-  final bool enabled;
-
-  EqBand copyWith({
-    EqFilterKind? kind,
-    double? freqHz,
-    double? q,
-    double? gainDb,
-    bool? enabled,
-  }) => EqBand(
-    kind: kind ?? this.kind,
-    freqHz: freqHz ?? this.freqHz,
-    q: q ?? this.q,
-    gainDb: gainDb ?? this.gainDb,
-    enabled: enabled ?? this.enabled,
-  );
-}
-
-/// The default 4-band layout — must match the engine's `Eq::new` defaults so the
-/// UI and audio agree from the first frame: low-shelf, two bells, high-shelf,
-/// all flat (0 dB).
-const List<EqBand> kDefaultEqBands = [
-  EqBand(
-    kind: EqFilterKind.lowShelf,
-    freqHz: 120,
-    q: 0.707,
-    gainDb: 0,
-    enabled: true,
-  ),
-  EqBand(
-    kind: EqFilterKind.peak,
-    freqHz: 500,
-    q: 1.0,
-    gainDb: 0,
-    enabled: true,
-  ),
-  EqBand(
-    kind: EqFilterKind.peak,
-    freqHz: 3000,
-    q: 1.0,
-    gainDb: 0,
-    enabled: true,
-  ),
-  EqBand(
-    kind: EqFilterKind.highShelf,
-    freqHz: 8000,
-    q: 0.707,
-    gainDb: 0,
-    enabled: true,
-  ),
-];
+// `EqBand` and `kDefaultEqBands` moved to engine_interface.dart so the Project
+// model can reference them without an import cycle. They're re-exported here
+// via the explicit import above for callers that used to expect them from this
+// file — Dart re-exports don't exist, so anyone needing the type now imports
+// engine_interface.dart directly.
 
 // EQ control ranges.
 const double kEqMinFreq = 20;

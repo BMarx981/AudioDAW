@@ -9,6 +9,7 @@ import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_io.dart';
+import 'project.dart';
 
 abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RustLibApiImplPlatform({
@@ -43,10 +44,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  ProjectFile dco_decode_box_autoadd_project_file(dynamic raw);
+
+  @protected
+  EqBandState dco_decode_eq_band_state(dynamic raw);
+
+  @protected
   double dco_decode_f_32(dynamic raw);
 
   @protected
   double dco_decode_f_64(dynamic raw);
+
+  @protected
+  List<EqBandState> dco_decode_list_eq_band_state(dynamic raw);
 
   @protected
   Float32List dco_decode_list_prim_f_32_strict(dynamic raw);
@@ -55,13 +65,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<TrackState> dco_decode_list_track_state(dynamic raw);
+
+  @protected
   LoadedClip dco_decode_loaded_clip(dynamic raw);
+
+  @protected
+  MasterState dco_decode_master_state(dynamic raw);
 
   @protected
   MixerMeters dco_decode_mixer_meters(dynamic raw);
 
   @protected
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
   PlaybackStatus dco_decode_playback_status(dynamic raw);
+
+  @protected
+  ProjectFile dco_decode_project_file(dynamic raw);
+
+  @protected
+  TrackState dco_decode_track_state(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -100,10 +125,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  ProjectFile sse_decode_box_autoadd_project_file(SseDeserializer deserializer);
+
+  @protected
+  EqBandState sse_decode_eq_band_state(SseDeserializer deserializer);
+
+  @protected
   double sse_decode_f_32(SseDeserializer deserializer);
 
   @protected
   double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
+  List<EqBandState> sse_decode_list_eq_band_state(SseDeserializer deserializer);
 
   @protected
   Float32List sse_decode_list_prim_f_32_strict(SseDeserializer deserializer);
@@ -112,13 +146,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<TrackState> sse_decode_list_track_state(SseDeserializer deserializer);
+
+  @protected
   LoadedClip sse_decode_loaded_clip(SseDeserializer deserializer);
+
+  @protected
+  MasterState sse_decode_master_state(SseDeserializer deserializer);
 
   @protected
   MixerMeters sse_decode_mixer_meters(SseDeserializer deserializer);
 
   @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
   PlaybackStatus sse_decode_playback_status(SseDeserializer deserializer);
+
+  @protected
+  ProjectFile sse_decode_project_file(SseDeserializer deserializer);
+
+  @protected
+  TrackState sse_decode_track_state(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -166,10 +215,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_project_file(
+    ProjectFile self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_eq_band_state(EqBandState self, SseSerializer serializer);
+
+  @protected
   void sse_encode_f_32(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_f_64(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_eq_band_state(
+    List<EqBandState> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_f_32_strict(
@@ -184,16 +248,34 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_track_state(
+    List<TrackState> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_loaded_clip(LoadedClip self, SseSerializer serializer);
 
   @protected
+  void sse_encode_master_state(MasterState self, SseSerializer serializer);
+
+  @protected
   void sse_encode_mixer_meters(MixerMeters self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
   void sse_encode_playback_status(
     PlaybackStatus self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_project_file(ProjectFile self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_track_state(TrackState self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

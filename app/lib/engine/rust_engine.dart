@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../src/rust/api/engine_api.dart' as rust;
+import '../src/rust/project.dart' as rust_proj;
 import 'engine_interface.dart';
 
 /// Production [EngineInterface] backed by the Rust engine over flutter_rust_bridge.
@@ -82,6 +83,19 @@ class RustEngine implements EngineInterface {
   void setMasterPan(double pan) => rust.setMasterPan(pan: pan);
 
   @override
+  void clearTrack(int track) => rust.clearTrack(track: track);
+
+  @override
+  Future<void> saveProject(String path, Project project) =>
+      rust.saveProject(path: path, project: _toBridge(project));
+
+  @override
+  Future<Project> loadProject(String path) async {
+    final p = await rust.loadProject(path: path);
+    return _fromBridge(p);
+  }
+
+  @override
   double get engineSampleRate => rust.engineSampleRate();
 
   @override
@@ -118,4 +132,78 @@ class RustEngine implements EngineInterface {
         ),
       )
       .asBroadcastStream();
+
+  // --- Project bridge conversion ------------------------------------------
+  //
+  // Pure data shuffling: a [Project] (UI-facing) becomes a generated
+  // `ProjectFile` for the trip across the bridge, and vice versa. The only
+  // non-mechanical bit is the EQ filter-kind enum <-> int code mapping, which
+  // matches engine/src/dsp/biquad.rs's `FilterKind::from_code`. Errors here
+  // (e.g. an unknown int code from a hand-edited JSON file) fall back to a
+  // transparent peaking bell — same behavior as the Rust side.
+
+  rust_proj.ProjectFile _toBridge(Project p) => rust_proj.ProjectFile(
+    // Always write the current schema; the Rust side ignores the field on
+    // save and overwrites it, but supplying it keeps the type total.
+    formatVersion: 1,
+    name: p.name,
+    tracks: [for (final t in p.tracks) _trackToBridge(t)],
+    master: _masterToBridge(p.master),
+  );
+
+  rust_proj.TrackState _trackToBridge(Track t) => rust_proj.TrackState(
+    name: t.name,
+    clipPath: t.clipPath,
+    gainDb: t.gainDb,
+    pan: t.pan,
+    eqBands: [for (final b in t.eqBands) _bandToBridge(b)],
+  );
+
+  rust_proj.MasterState _masterToBridge(MasterBus m) => rust_proj.MasterState(
+    gainDb: m.gainDb,
+    pan: m.pan,
+    eqBands: [for (final b in m.eqBands) _bandToBridge(b)],
+  );
+
+  rust_proj.EqBandState _bandToBridge(EqBand b) => rust_proj.EqBandState(
+    kind: b.kind.code,
+    freqHz: b.freqHz,
+    q: b.q,
+    gainDb: b.gainDb,
+    enabled: b.enabled,
+  );
+
+  Project _fromBridge(rust_proj.ProjectFile p) => Project(
+    name: p.name,
+    tracks: [for (final t in p.tracks) _trackFromBridge(t)],
+    master: _masterFromBridge(p.master),
+  );
+
+  Track _trackFromBridge(rust_proj.TrackState t) => Track(
+    name: t.name,
+    clipPath: t.clipPath,
+    gainDb: t.gainDb,
+    pan: t.pan,
+    eqBands: [for (final b in t.eqBands) _bandFromBridge(b)],
+  );
+
+  MasterBus _masterFromBridge(rust_proj.MasterState m) => MasterBus(
+    gainDb: m.gainDb,
+    pan: m.pan,
+    eqBands: [for (final b in m.eqBands) _bandFromBridge(b)],
+  );
+
+  EqBand _bandFromBridge(rust_proj.EqBandState b) => EqBand(
+    kind: EqFilterKind.values.firstWhere(
+      (k) => k.code == b.kind,
+      // Unknown code (e.g. a future kind, or a corrupted file) falls back to a
+      // transparent peaking bell — matches the Rust `FilterKind::from_code`
+      // default.
+      orElse: () => EqFilterKind.peak,
+    ),
+    freqHz: b.freqHz,
+    q: b.q,
+    gainDb: b.gainDb,
+    enabled: b.enabled,
+  );
 }

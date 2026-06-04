@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
@@ -10,89 +11,145 @@ import 'eq_view.dart';
 import 'oscilloscope.dart';
 import 'waveform_view.dart';
 
-/// Number of user-visible tracks for Milestone 4 — two playable tracks plus a
-/// master bus. The engine's strip pool is larger (`engine.maxTracks`) so M5 can
-/// expose more without an audio-thread refactor.
-const int kVisibleTracks = 2;
-
 /// Open a native file dialog and return the chosen WAV's path, or null if the
-/// user cancelled. The default file-picker for [HomePage]; tests inject their own
-/// so they never pop a real dialog.
+/// user cancelled. The default file-picker for [HomePage]; tests inject their
+/// own so they never pop a real dialog.
 Future<String?> pickWavWithDialog() async {
   const wav = XTypeGroup(label: 'WAV audio', extensions: ['wav']);
   final file = await openFile(acceptedTypeGroups: const [wav]);
   return file?.path;
 }
 
-/// The Milestone 4 UI: open WAVs into two tracks, mix them through gain/pan/EQ,
-/// summed to a master bus with its own fader and meter.
+/// Open a native save dialog for the project file. Returns the chosen path or
+/// null on cancel.
+Future<String?> pickProjectSavePathWithDialog() async {
+  const proj = XTypeGroup(label: 'DAW project', extensions: ['json']);
+  final loc = await getSaveLocation(
+    acceptedTypeGroups: const [proj],
+    suggestedName: 'project.json',
+  );
+  return loc?.path;
+}
+
+/// Open a native open dialog for a project file. Returns the chosen path or
+/// null on cancel.
+Future<String?> pickProjectOpenPathWithDialog() async {
+  const proj = XTypeGroup(label: 'DAW project', extensions: ['json']);
+  final file = await openFile(acceptedTypeGroups: const [proj]);
+  return file?.path;
+}
+
+/// The Milestone 5 UI: a dynamic number of tracks (up to `engine.maxTracks`),
+/// each with its own gain/pan/EQ chain, summed to a master bus that has its
+/// own fader and meter. Tracks can be added and removed at runtime without
+/// dropouts (the engine pre-allocates the whole strip pool); projects can be
+/// saved to and loaded from JSON.
 ///
 /// The widget stays dumb — it owns only view state and forwards intent to the
 /// injected [EngineInterface]. It never imports the Rust bridge, which is what
-/// lets the widget test drive it with a fake engine and a fake file picker.
+/// lets widget tests drive it with a fake engine and fake file pickers.
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, required this.engine, this.pickWavPath});
+  const HomePage({
+    super.key,
+    required this.engine,
+    this.pickWavPath,
+    this.pickProjectSavePath,
+    this.pickProjectOpenPath,
+  });
 
   final EngineInterface engine;
 
-  /// Returns the path of a WAV to load, or null to cancel. Defaults to a native
-  /// open dialog; tests inject a stub.
+  /// Returns the path of a WAV to load, or null to cancel. Defaults to the
+  /// native open dialog; tests inject a stub.
   final Future<String?> Function()? pickWavPath;
+
+  /// Returns the path to save a project to, or null to cancel.
+  final Future<String?> Function()? pickProjectSavePath;
+
+  /// Returns the path of a project to open, or null to cancel.
+  final Future<String?> Function()? pickProjectOpenPath;
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
+/// One row of per-track UI state. Mirrors a [Track] (the project DTO) plus a
+/// few transient bits the file doesn't need to remember: the live [ClipInfo]
+/// for the waveform, a busy flag for the loader, a `missing` flag set when a
+/// project referenced a clip path that couldn't be decoded.
+///
+/// `engineSlot` is the **stable** pool index this track uses. When a track is
+/// removed, that slot goes back into the free pool and a future "add" reuses
+/// it. Decoupling display order from engine slot means removing track 2 doesn't
+/// force re-decoding the WAVs on tracks 3..N.
+class _TrackUi {
+  _TrackUi({
+    required this.name,
+    required this.engineSlot,
+    this.clipPath,
+    this.gainLinear = 1.0,
+    this.pan = 0.0,
+    List<EqBand>? eqBands,
+  }) : eqBands = eqBands ?? List.of(kDefaultEqBands);
+
+  String name;
+  int engineSlot;
+  String? clipPath;
+  String? filename;
+  ClipInfo? clip;
+  double gainLinear;
+  // Fader mode is a pure UI choice; resets to the default whenever a track is
+  // created/loaded — there's nothing in the project file to restore.
+  GainFaderMode gainMode = GainFaderMode.db6;
+  double pan;
+  List<EqBand> eqBands;
+  bool busy = false;
+  bool missing = false;
+}
+
 class _HomePageState extends State<HomePage> {
-  // Per-track state, sized to the user-visible track count. The engine's pool
-  // is larger; we don't index past kVisibleTracks here.
-  final List<ClipInfo?> _clips = List.filled(kVisibleTracks, null);
-  final List<String?> _filenames = List.filled(kVisibleTracks, null);
-  // Per-track mixer state. Each is independent so a fade on track 1 doesn't
-  // touch track 2.
-  late final List<double> _trackGain = List.filled(kVisibleTracks, 1.0);
-  late final List<GainFaderMode> _trackGainMode =
-      List.filled(kVisibleTracks, GainFaderMode.db6);
-  late final List<double> _trackPan = List.filled(kVisibleTracks, 0.0);
-  late final List<List<EqBand>> _trackEqBands =
-      List.generate(kVisibleTracks, (_) => List.of(kDefaultEqBands));
+  /// User-visible tracks, in display order. May be empty (no tracks → silence).
+  final List<_TrackUi> _tracks = [];
+
+  /// Engine slots currently held by [_tracks]. Used to find a free slot for
+  /// "Add Track" without scanning the list every time.
+  final Set<int> _usedSlots = {};
 
   // Master bus state.
   double _masterGain = 1.0;
   GainFaderMode _masterGainMode = GainFaderMode.db6;
   double _masterPan = 0;
 
-  // Global transport state. With one playhead per engine, every track plays in
-  // sync — so a single set of fields is correct.
+  // Global transport state. With one playhead per engine, every track plays
+  // in sync — so a single set of fields is correct.
   double _positionSecs = 0;
   bool _playing = false;
   bool _looping = false;
 
-  // The track whose EQ panel is currently being edited (Milestone 4 UX: one EQ
-  // panel below the mixer, with strip selection swapping its focus).
-  int _selectedTrack = 0;
+  // The track whose EQ panel is currently being edited. -1 when no track is
+  // selected (e.g. all tracks have been removed).
+  int _selectedTrack = -1;
 
-  // Set when a load is in flight — guards each track's "Open WAV…" against
-  // double-taps. Tracked per track so loading track 1 doesn't lock track 0's
-  // button.
-  late final List<bool> _busy = List.filled(kVisibleTracks, false);
+  // Set while a project load/save is in flight, so the AppBar action buttons
+  // dim and don't queue duplicate dialogs.
+  bool _projectBusy = false;
+
+  /// Cached project name (from the last load/save), shown in the AppBar.
+  String _projectName = 'Untitled';
 
   late final double _eqSampleRate = widget.engine.engineSampleRate;
   late final StreamSubscription<PlaybackState> _statusSub;
   late final Stream<Float32List> _scopeFrames = widget.engine.scopeFrames;
 
-  /// One subscription to the engine's mixer-wide meter stream; per-strip views
-  /// are derived as broadcast streams from this so each [ChannelStrip] gets
-  /// only its own track's data.
   late final Stream<MixerMeters> _mixerMeters =
       widget.engine.mixerMeters.asBroadcastStream();
 
-  // Per-track meter views derived from the mixer stream. Cached so each rebuild
-  // doesn't re-create the mapped stream (which would re-subscribe on every
-  // build and churn the StreamBuilder).
-  late final List<Stream<MeterLevels>> _trackMeters = List.generate(
-    kVisibleTracks,
-    (t) => _mixerMeters.map((m) => m.trackLevels(t)).asBroadcastStream(),
+  /// Per-engine-slot meter views. The mixer publishes a slot-indexed array so
+  /// we key on slot, not on display index — that way removing track 0 doesn't
+  /// drift the rest of the strips' meter sources by one.
+  late final List<Stream<MeterLevels>> _slotMeters = List.generate(
+    widget.engine.maxTracks,
+    (slot) => _mixerMeters.map((m) => m.trackLevels(slot)).asBroadcastStream(),
   );
   late final Stream<MeterLevels> _masterMeter =
       _mixerMeters.map((m) => m.masterLevels).asBroadcastStream();
@@ -117,42 +174,140 @@ class _HomePageState extends State<HomePage> {
 
   // --- Selected-track helpers ---------------------------------------------
 
-  ClipInfo? get _selectedClip => _clips[_selectedTrack];
+  _TrackUi? get _selected {
+    if (_selectedTrack < 0 || _selectedTrack >= _tracks.length) return null;
+    return _tracks[_selectedTrack];
+  }
+
+  ClipInfo? get _selectedClip => _selected?.clip;
   double get _duration => _selectedClip?.durationSecs ?? 0;
   double get _positionFraction =>
       _duration > 0 ? (_positionSecs / _duration).clamp(0.0, 1.0) : 0.0;
 
+  bool get _anyClipLoaded => _tracks.any((t) => t.clip != null);
+
+  // --- Track add / remove --------------------------------------------------
+
+  /// Lowest engine-pool index not currently in use, or null if the pool is
+  /// full. Pool capacity is fixed at engine start, so this is cheap.
+  int? _nextFreeSlot() {
+    for (var i = 0; i < widget.engine.maxTracks; i++) {
+      if (!_usedSlots.contains(i)) return i;
+    }
+    return null;
+  }
+
+  /// Create a new empty track at the end of the row. Disabled (the UI guards)
+  /// when the engine pool is full.
+  void _addTrack() {
+    final slot = _nextFreeSlot();
+    if (slot == null) return;
+    setState(() {
+      _usedSlots.add(slot);
+      _tracks.add(
+        _TrackUi(
+          // "Track N" where N is one past the highest existing name we can
+          // parse — sequential even after removes, which is the least
+          // surprising default. The user can rename later (no rename UI yet).
+          name: 'Track ${_nextTrackNumber()}',
+          engineSlot: slot,
+        ),
+      );
+      // Auto-select only the very first track. Subsequent adds preserve the
+      // user's current EQ-panel focus, which avoids a surprise context switch
+      // when you build up the row.
+      if (_selectedTrack < 0) _selectedTrack = _tracks.length - 1;
+    });
+  }
+
+  /// One past the largest "Track N" suffix already in use; falls back to
+  /// `tracks.length + 1` for un-parseable names so adding always produces a
+  /// fresh number.
+  int _nextTrackNumber() {
+    var highest = 0;
+    final re = RegExp(r'^Track (\d+)$');
+    for (final t in _tracks) {
+      final m = re.firstMatch(t.name);
+      if (m != null) {
+        final n = int.tryParse(m.group(1)!) ?? 0;
+        if (n > highest) highest = n;
+      }
+    }
+    return highest >= _tracks.length ? highest + 1 : _tracks.length + 1;
+  }
+
+  /// Remove the track at display index [i]. Calls [clearTrack] on the engine
+  /// so the slot resets to defaults — no allocation on the audio thread, the
+  /// strip pool already exists at full size.
+  void _removeTrack(int i) {
+    if (i < 0 || i >= _tracks.length) return;
+    final removed = _tracks[i];
+    widget.engine.clearTrack(removed.engineSlot);
+    setState(() {
+      _tracks.removeAt(i);
+      _usedSlots.remove(removed.engineSlot);
+      // Keep _selectedTrack in range — slide it down by one if a track before
+      // it was removed; clamp to the new last index otherwise.
+      if (_tracks.isEmpty) {
+        _selectedTrack = -1;
+      } else {
+        if (i < _selectedTrack) {
+          _selectedTrack -= 1;
+        }
+        _selectedTrack = _selectedTrack.clamp(0, _tracks.length - 1);
+      }
+      // If the removed track had nothing playable left, reflect that in the
+      // global transport state so the buttons grey out.
+      if (!_anyClipLoaded) _playing = false;
+    });
+  }
+
   // --- Transport ----------------------------------------------------------
 
-  Future<void> _openWavFor(int track) async {
-    if (_busy[track]) return;
+  Future<void> _openWavFor(int i) async {
+    if (i < 0 || i >= _tracks.length) return;
+    final track = _tracks[i];
+    if (track.busy) return;
     final pick = widget.pickWavPath ?? pickWavWithDialog;
     final path = await pick();
     if (path == null) return; // cancelled
+    await _loadClipInto(i, path);
+  }
 
-    setState(() => _busy[track] = true);
+  /// Decode and assign a WAV at [path] into track at display index [i].
+  /// Surface decode failures as a `missing` flag + a SnackBar without aborting
+  /// — used both by the user-initiated "Open WAV…" and by [_loadProject].
+  Future<void> _loadClipInto(int i, String path) async {
+    final track = _tracks[i];
+    setState(() => track.busy = true);
     try {
-      final clip = await widget.engine.loadWav(track, path);
+      final clip = await widget.engine.loadWav(track.engineSlot, path);
       setState(() {
-        _clips[track] = clip;
-        _filenames[track] = _basename(path);
+        track.clip = clip;
+        track.clipPath = path;
+        track.filename = _basename(path);
+        track.missing = false;
         _positionSecs = 0;
         _playing = false;
       });
     } catch (e) {
+      setState(() {
+        // Keep the path so the user can see what was missing, but mark the
+        // track as having no live clip and surface it visually.
+        track.clipPath = path;
+        track.filename = _basename(path);
+        track.missing = true;
+        track.clip = null;
+      });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not load WAV: $e')),
+          SnackBar(content: Text('Could not load ${_basename(path)}: $e')),
         );
       }
     } finally {
-      if (mounted) setState(() => _busy[track] = false);
+      if (mounted) setState(() => track.busy = false);
     }
   }
-
-  /// True once at least one track has a clip — only then do the transport
-  /// controls make sense to show as active.
-  bool get _anyClipLoaded => _clips.any((c) => c != null);
 
   void _togglePlay() {
     if (!_anyClipLoaded) return;
@@ -180,28 +335,28 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _onSeek(double fraction) {
-    if (_selectedClip == null) return;
+    if (_selected?.clip == null) return;
     final secs = fraction * _duration;
-    // Optimistic local update so the playhead tracks the gesture immediately;
-    // the status stream confirms it on the next tick.
     setState(() => _positionSecs = secs);
     widget.engine.seek(secs);
   }
 
   // --- Per-track mixer callbacks ------------------------------------------
 
-  void _onTrackGainChanged(int track, double linear) {
-    setState(() => _trackGain[track] = linear);
-    widget.engine.setTrackGainLinear(track, linear);
+  void _onTrackGainChanged(int i, double linear) {
+    final t = _tracks[i];
+    setState(() => t.gainLinear = linear);
+    widget.engine.setTrackGainLinear(t.engineSlot, linear);
   }
 
-  void _onTrackGainModeChanged(int track, GainFaderMode mode) {
-    setState(() => _trackGainMode[track] = mode);
+  void _onTrackGainModeChanged(int i, GainFaderMode mode) {
+    setState(() => _tracks[i].gainMode = mode);
   }
 
-  void _onTrackPanChanged(int track, double pan) {
-    setState(() => _trackPan[track] = pan);
-    widget.engine.setTrackPan(track, pan);
+  void _onTrackPanChanged(int i, double pan) {
+    final t = _tracks[i];
+    setState(() => t.pan = pan);
+    widget.engine.setTrackPan(t.engineSlot, pan);
   }
 
   // --- Master bus callbacks -----------------------------------------------
@@ -222,44 +377,207 @@ class _HomePageState extends State<HomePage> {
 
   // --- EQ panel (targets the selected track) ------------------------------
 
-  void _updateSelectedBand(int i, EqBand band) {
+  void _updateSelectedBand(int band, EqBand updated) {
+    final t = _selected;
+    if (t == null) return;
     setState(() {
-      _trackEqBands[_selectedTrack] = [..._trackEqBands[_selectedTrack]]
-        ..[i] = band;
+      t.eqBands = [...t.eqBands]..[band] = updated;
     });
   }
 
-  void _onEqFreq(int i, double hz) {
-    _updateSelectedBand(i, _trackEqBands[_selectedTrack][i].copyWith(freqHz: hz));
-    widget.engine.setTrackEqBandFreq(_selectedTrack, i, hz);
+  void _onEqFreq(int band, double hz) {
+    final t = _selected;
+    if (t == null) return;
+    _updateSelectedBand(band, t.eqBands[band].copyWith(freqHz: hz));
+    widget.engine.setTrackEqBandFreq(t.engineSlot, band, hz);
   }
 
-  void _onEqGain(int i, double db) {
-    _updateSelectedBand(i, _trackEqBands[_selectedTrack][i].copyWith(gainDb: db));
-    widget.engine.setTrackEqBandGainDb(_selectedTrack, i, db);
+  void _onEqGain(int band, double db) {
+    final t = _selected;
+    if (t == null) return;
+    _updateSelectedBand(band, t.eqBands[band].copyWith(gainDb: db));
+    widget.engine.setTrackEqBandGainDb(t.engineSlot, band, db);
   }
 
-  void _onEqQ(int i, double q) {
-    _updateSelectedBand(i, _trackEqBands[_selectedTrack][i].copyWith(q: q));
-    widget.engine.setTrackEqBandQ(_selectedTrack, i, q);
+  void _onEqQ(int band, double q) {
+    final t = _selected;
+    if (t == null) return;
+    _updateSelectedBand(band, t.eqBands[band].copyWith(q: q));
+    widget.engine.setTrackEqBandQ(t.engineSlot, band, q);
   }
 
-  void _onEqKind(int i, EqFilterKind kind) {
-    _updateSelectedBand(i, _trackEqBands[_selectedTrack][i].copyWith(kind: kind));
-    widget.engine.setTrackEqBandKind(_selectedTrack, i, kind);
+  void _onEqKind(int band, EqFilterKind kind) {
+    final t = _selected;
+    if (t == null) return;
+    _updateSelectedBand(band, t.eqBands[band].copyWith(kind: kind));
+    widget.engine.setTrackEqBandKind(t.engineSlot, band, kind);
   }
 
-  void _onEqEnabled(int i, bool on) {
-    _updateSelectedBand(i, _trackEqBands[_selectedTrack][i].copyWith(enabled: on));
-    widget.engine.setTrackEqBandEnabled(_selectedTrack, i, on);
+  void _onEqEnabled(int band, bool on) {
+    final t = _selected;
+    if (t == null) return;
+    _updateSelectedBand(band, t.eqBands[band].copyWith(enabled: on));
+    widget.engine.setTrackEqBandEnabled(t.engineSlot, band, on);
+  }
+
+  // --- Save / Load --------------------------------------------------------
+
+  /// Build a [Project] snapshot from the current UI state.
+  Project _snapshotProject() => Project(
+    name: _projectName,
+    tracks: [
+      for (final t in _tracks)
+        Track(
+          name: t.name,
+          clipPath: t.clipPath,
+          gainDb: _linearToDb(t.gainLinear),
+          pan: t.pan,
+          eqBands: t.eqBands,
+        ),
+    ],
+    master: MasterBus(
+      gainDb: _linearToDb(_masterGain),
+      pan: _masterPan,
+      eqBands: const [], // master EQ isn't UI-exposed yet — empty in v1
+    ),
+  );
+
+  Future<void> _saveProject() async {
+    if (_projectBusy) return;
+    final pick = widget.pickProjectSavePath ?? pickProjectSavePathWithDialog;
+    final path = await pick();
+    if (path == null) return;
+    setState(() => _projectBusy = true);
+    try {
+      await widget.engine.saveProject(path, _snapshotProject());
+      if (!mounted) return;
+      setState(() => _projectName = _basenameNoExt(path));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Saved to ${_basename(path)}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _projectBusy = false);
+    }
+  }
+
+  Future<void> _loadProject() async {
+    if (_projectBusy) return;
+    final pick = widget.pickProjectOpenPath ?? pickProjectOpenPathWithDialog;
+    final path = await pick();
+    if (path == null) return;
+
+    setState(() => _projectBusy = true);
+    try {
+      final p = await widget.engine.loadProject(path);
+      await _applyProject(p, sourcePath: path);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _projectBusy = false);
+    }
+  }
+
+  /// Replace the current UI + engine state with [p]. Engine slots get
+  /// re-assigned 0..N-1 in display order. WAV loads are best-effort: a missing
+  /// file marks just its track as `missing` rather than aborting the load.
+  Future<void> _applyProject(Project p, {String? sourcePath}) async {
+    // 1. Clear every currently-used slot on the engine. Cheap; just a command
+    //    push per slot.
+    for (final t in _tracks) {
+      widget.engine.clearTrack(t.engineSlot);
+    }
+
+    // 2. Build the new track list and reserve fresh slots 0..N-1.
+    final maxSlots = widget.engine.maxTracks;
+    final newTracks = <_TrackUi>[];
+    for (var i = 0; i < p.tracks.length && i < maxSlots; i++) {
+      final src = p.tracks[i];
+      newTracks.add(
+        _TrackUi(
+          name: src.name,
+          engineSlot: i,
+          clipPath: src.clipPath,
+          gainLinear: _dbToLinear(src.gainDb),
+          pan: src.pan,
+          eqBands: src.eqBands.isEmpty ? List.of(kDefaultEqBands) : src.eqBands,
+        ),
+      );
+    }
+    setState(() {
+      _tracks
+        ..clear()
+        ..addAll(newTracks);
+      _usedSlots
+        ..clear()
+        ..addAll([for (final t in newTracks) t.engineSlot]);
+      _masterGain = _dbToLinear(p.master.gainDb);
+      _masterPan = p.master.pan;
+      _projectName = p.name.isEmpty
+          ? (sourcePath == null ? 'Untitled' : _basenameNoExt(sourcePath))
+          : p.name;
+      _selectedTrack = _tracks.isEmpty ? -1 : 0;
+      _positionSecs = 0;
+      _playing = false;
+    });
+
+    // 3. Push the per-track parameters to the engine so the audio side
+    //    matches what the UI just rendered.
+    for (final t in _tracks) {
+      widget.engine.setTrackGainLinear(t.engineSlot, t.gainLinear);
+      widget.engine.setTrackPan(t.engineSlot, t.pan);
+      for (var b = 0; b < t.eqBands.length; b++) {
+        final band = t.eqBands[b];
+        widget.engine.setTrackEqBandKind(t.engineSlot, b, band.kind);
+        widget.engine.setTrackEqBandFreq(t.engineSlot, b, band.freqHz);
+        widget.engine.setTrackEqBandQ(t.engineSlot, b, band.q);
+        widget.engine.setTrackEqBandGainDb(t.engineSlot, b, band.gainDb);
+        widget.engine.setTrackEqBandEnabled(t.engineSlot, b, band.enabled);
+      }
+    }
+    widget.engine.setMasterGainLinear(_masterGain);
+    widget.engine.setMasterPan(_masterPan);
+
+    // 4. Best-effort WAV loads. Sequential so progress is visible; per-file
+    //    failures stay on the per-track row, not on the whole project.
+    for (var i = 0; i < _tracks.length; i++) {
+      final cp = _tracks[i].clipPath;
+      if (cp != null && cp.isNotEmpty) {
+        await _loadClipInto(i, cp);
+      }
+    }
   }
 
   // --- Build --------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
+    final maxOut = widget.engine.maxTracks;
+    final canAdd = _tracks.length < maxOut;
     return Scaffold(
-      appBar: AppBar(title: const Text('DAW — Milestone 4 (Mixer)')),
+      appBar: AppBar(
+        title: Text('DAW — Milestone 5  •  $_projectName'),
+        actions: [
+          IconButton(
+            tooltip: 'Open project…',
+            onPressed: _projectBusy ? null : _loadProject,
+            icon: const Icon(Icons.folder_open),
+          ),
+          IconButton(
+            tooltip: 'Save project…',
+            onPressed: _projectBusy ? null : _saveProject,
+            icon: const Icon(Icons.save),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
       body: Center(
         child: SingleChildScrollView(
           child: ConstrainedBox(
@@ -270,20 +588,28 @@ class _HomePageState extends State<HomePage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // Per-track "Open WAV" rows — one per visible track.
-                  for (int t = 0; t < kVisibleTracks; t++) ...[
+                  // Per-track "Open WAV" rows.
+                  if (_tracks.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      child: Text(
+                        'No tracks yet. Add one below to get started.',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ),
+                  for (int i = 0; i < _tracks.length; i++) ...[
                     _OpenWavRow(
-                      label: 'Track ${t + 1}',
-                      filename: _filenames[t],
-                      busy: _busy[t],
-                      onOpen: () => _openWavFor(t),
+                      label: _tracks[i].name,
+                      filename: _tracks[i].filename,
+                      missing: _tracks[i].missing,
+                      busy: _tracks[i].busy,
+                      onOpen: () => _openWavFor(i),
                     ),
                     const SizedBox(height: 8),
                   ],
                   const SizedBox(height: 8),
 
-                  // Waveform of the currently-selected track. Mostly there to
-                  // anchor the scrubber to whichever clip the user is editing.
+                  // Waveform of the currently-selected track.
                   if (_selectedClip != null) ...[
                     WaveformView(
                       min: _selectedClip!.waveformMin,
@@ -293,7 +619,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Track ${_selectedTrack + 1}  •  '
+                      '${_selected!.name}  •  '
                       '${_fmt(_positionSecs)} / ${_fmt(_duration)}'
                       '   •   ${_selectedClip!.sampleRate.toStringAsFixed(0)} Hz'
                       '   •   ${_selectedClip!.channels == 1 ? 'mono' : '${_selectedClip!.channels} ch'}',
@@ -329,33 +655,43 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 24),
 
-                  // Mixer row: two track strips + master strip, side by side.
-                  // Wrapped in a horizontal scroller so it stays usable on
-                  // narrow windows (and inside the 800×600 widget-test viewport)
-                  // — real DAW mixers scroll horizontally anyway.
+                  // Mixer row: dynamic track strips, an "Add Track" tile, and
+                  // the master strip on the right. Horizontal-scrollable so it
+                  // stays usable past about six tracks on narrow windows.
                   SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        for (int t = 0; t < kVisibleTracks; t++) ...[
-                          ChannelStrip(
-                            title: 'Track ${t + 1}',
-                            selected: _selectedTrack == t,
-                            onTap: () =>
-                                setState(() => _selectedTrack = t),
-                            gainLinear: _trackGain[t],
-                            gainMode: _trackGainMode[t],
-                            pan: _trackPan[t],
-                            meter: _trackMeters[t],
-                            onGainLinearChanged: (lin) =>
-                                _onTrackGainChanged(t, lin),
-                            onGainModeChanged: (m) =>
-                                _onTrackGainModeChanged(t, m),
-                            onPanChanged: (p) => _onTrackPanChanged(t, p),
+                        for (int i = 0; i < _tracks.length; i++) ...[
+                          _StripWithRemove(
+                            onRemove: () => _removeTrack(i),
+                            child: ChannelStrip(
+                              title: _tracks[i].name,
+                              selected: _selectedTrack == i,
+                              onTap: () =>
+                                  setState(() => _selectedTrack = i),
+                              gainLinear: _tracks[i].gainLinear,
+                              gainMode: _tracks[i].gainMode,
+                              pan: _tracks[i].pan,
+                              meter: _slotMeters[_tracks[i].engineSlot],
+                              onGainLinearChanged: (lin) =>
+                                  _onTrackGainChanged(i, lin),
+                              onGainModeChanged: (m) =>
+                                  _onTrackGainModeChanged(i, m),
+                              onPanChanged: (p) => _onTrackPanChanged(i, p),
+                            ),
                           ),
                           const SizedBox(width: 12),
                         ],
+                        _AddTrackTile(
+                          enabled: canAdd,
+                          tooltip: canAdd
+                              ? 'Add track'
+                              : 'Pool is full ($maxOut max)',
+                          onTap: _addTrack,
+                        ),
+                        const SizedBox(width: 12),
                         ChannelStrip(
                           title: 'Master',
                           gainLinear: _masterGain,
@@ -371,24 +707,25 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 24),
 
-                  // EQ panel — edits whichever track strip is selected. The
-                  // header makes the focus obvious; the strip's highlight in
-                  // the row above is the visual companion.
-                  Text(
-                    'EQ — Track ${_selectedTrack + 1}',
-                    style: Theme.of(context).textTheme.labelMedium,
-                  ),
-                  const SizedBox(height: 8),
-                  EqView(
-                    bands: _trackEqBands[_selectedTrack],
-                    sampleRate: _eqSampleRate,
-                    onFreqChanged: _onEqFreq,
-                    onGainChanged: _onEqGain,
-                    onQChanged: _onEqQ,
-                    onKindChanged: _onEqKind,
-                    onEnabledChanged: _onEqEnabled,
-                  ),
-                  const SizedBox(height: 24),
+                  // EQ panel — edits whichever track strip is selected. Only
+                  // shown when there's actually a track to edit.
+                  if (_selected != null) ...[
+                    Text(
+                      'EQ — ${_selected!.name}',
+                      style: Theme.of(context).textTheme.labelMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    EqView(
+                      bands: _selected!.eqBands,
+                      sampleRate: _eqSampleRate,
+                      onFreqChanged: _onEqFreq,
+                      onGainChanged: _onEqGain,
+                      onQChanged: _onEqQ,
+                      onKindChanged: _onEqKind,
+                      onEnabledChanged: _onEqEnabled,
+                    ),
+                    const SizedBox(height: 24),
+                  ],
                   Text(
                     'Master output',
                     style: Theme.of(context).textTheme.labelMedium,
@@ -412,21 +749,27 @@ class _OpenWavRow extends StatelessWidget {
     required this.label,
     required this.filename,
     required this.busy,
+    required this.missing,
     required this.onOpen,
   });
 
   final String label;
   final String? filename;
   final bool busy;
+  final bool missing;
   final VoidCallback onOpen;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final filenameText = filename == null
+        ? 'No file loaded'
+        : (missing ? '$filename (missing)' : filename!);
     return Row(
       children: [
         SizedBox(
-          width: 64,
-          child: Text(label, style: Theme.of(context).textTheme.labelMedium),
+          width: 80,
+          child: Text(label, style: theme.textTheme.labelMedium),
         ),
         FilledButton.icon(
           onPressed: busy ? null : onOpen,
@@ -436,9 +779,95 @@ class _OpenWavRow extends StatelessWidget {
         const SizedBox(width: 12),
         Expanded(
           child: Text(
-            filename ?? 'No file loaded',
+            filenameText,
             overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.bodyMedium,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: missing ? theme.colorScheme.error : null,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A channel strip with a small "remove" button floating above it. The button
+/// sits outside the strip's own widget so the [ChannelStrip] stays dumb.
+class _StripWithRemove extends StatelessWidget {
+  const _StripWithRemove({required this.child, required this.onRemove});
+
+  final Widget child;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        SizedBox(
+          height: 28,
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: IconButton(
+              tooltip: 'Remove track',
+              onPressed: onRemove,
+              iconSize: 18,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              icon: const Icon(Icons.close),
+            ),
+          ),
+        ),
+        child,
+      ],
+    );
+  }
+}
+
+/// The plus-sign tile that appears after the last track. Same vertical
+/// footprint as a [ChannelStrip] so the row stays aligned.
+class _AddTrackTile extends StatelessWidget {
+  const _AddTrackTile({
+    required this.enabled,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final bool enabled;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colour = enabled
+        ? theme.colorScheme.primary
+        : theme.disabledColor;
+    return Column(
+      children: [
+        const SizedBox(height: 28), // align with _StripWithRemove
+        Tooltip(
+          message: tooltip,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: enabled ? onTap : null,
+              child: Container(
+                width: 80,
+                height: 410, // same height as a ChannelStrip body
+                decoration: BoxDecoration(
+                  color: const Color(0xFF15151B),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: colour.withValues(alpha: 0.4),
+                    width: 1,
+                  ),
+                ),
+                child: Center(
+                  child: Icon(Icons.add, color: colour, size: 32),
+                ),
+              ),
+            ),
           ),
         ),
       ],
@@ -454,9 +883,30 @@ String _fmt(double secs) {
   return '${m.toString().padLeft(2, '0')}:${s.toStringAsFixed(1).padLeft(4, '0')}';
 }
 
-/// Last path segment of [path], handling both `/` and `\` so we don't pull in
-/// `dart:io` just to show a filename.
+/// Last path segment of [path], handling both `/` and `\` so we don't pull
+/// in `dart:io` just to show a filename.
 String _basename(String path) {
   final cut = path.lastIndexOf(RegExp(r'[/\\]'));
   return cut < 0 ? path : path.substring(cut + 1);
+}
+
+/// [_basename] minus the final `.ext`, if any. Used to derive a project name
+/// from a saved/loaded file path.
+String _basenameNoExt(String path) {
+  final base = _basename(path);
+  final dot = base.lastIndexOf('.');
+  return dot <= 0 ? base : base.substring(0, dot);
+}
+
+/// Linear-to-dB helper for converting [Project] file values to fader linear.
+/// `kGainFloorDb` (channel_strip.dart) is the mute floor — anything at or below
+/// it maps to a true 0.0 linear, matching the engine's hard-mute behavior.
+double _linearToDb(double linear) {
+  if (linear <= 0) return kGainFloorDb;
+  return 20 * (math.log(linear) / math.ln10);
+}
+
+double _dbToLinear(double db) {
+  if (db <= kGainFloorDb) return 0;
+  return math.pow(10, db / 20).toDouble();
 }

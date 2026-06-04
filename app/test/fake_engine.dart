@@ -104,6 +104,43 @@ class FakeEngine implements EngineInterface {
   @override
   void setMasterPan(double pan) => masterPans.add(pan);
 
+  /// Track indices that [clearTrack] has been called with, in order.
+  final List<int> clearedTracks = [];
+
+  @override
+  void clearTrack(int track) => clearedTracks.add(track);
+
+  /// Every (path, project) pair `saveProject` was called with. Tests assert on
+  /// these to confirm the UI built the right snapshot.
+  final List<({String path, Project project})> savedProjects = [];
+
+  /// If set, [saveProject] throws this instead of recording — used to test the
+  /// error path (e.g. "disk full" / "permission denied").
+  Object? saveError;
+
+  @override
+  Future<void> saveProject(String path, Project project) async {
+    if (saveError != null) throw saveError!;
+    savedProjects.add((path: path, project: project));
+  }
+
+  /// What [loadProject] returns when it succeeds. Defaults to an empty project
+  /// so the no-files path is the default test setup.
+  Project loadProjectResult = const Project();
+
+  /// If set, [loadProject] throws this — for testing the malformed/missing case.
+  Object? loadProjectError;
+
+  /// Every path `loadProject` was called with, in order.
+  final List<String> loadedProjectPaths = [];
+
+  @override
+  Future<Project> loadProject(String path) async {
+    if (loadProjectError != null) throw loadProjectError!;
+    loadedProjectPaths.add(path);
+    return loadProjectResult;
+  }
+
   @override
   double get engineSampleRate => 48000;
 

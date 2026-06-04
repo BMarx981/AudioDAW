@@ -4,6 +4,7 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
+import '../project.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `lock`, `with_engine`
@@ -119,6 +120,31 @@ void setMasterGainLinear({required double linear}) =>
 /// Set the master bus pan in `[-1, 1]`. Fire-and-forget; clamped + smoothed.
 void setMasterPan({required double pan}) =>
     RustLib.instance.api.crateApiEngineApiSetMasterPan(pan: pan);
+
+/// Drop the clip on `track` and reset its strip to defaults. Fire-and-forget —
+/// the displaced clip retires on the audio→control ring and is freed off the
+/// audio thread. Used by the UI's "remove track" action.
+void clearTrack({required int track}) =>
+    RustLib.instance.api.crateApiEngineApiClearTrack(track: track);
+
+/// Write `project` to `path` as JSON. Throws on the Dart side if the file
+/// can't be written (path doesn't exist, permission denied, etc.) — the
+/// Result→Future mapping turns the error string into a Dart exception. Runs
+/// off the audio thread (file I/O).
+Future<void> saveProject({
+  required String path,
+  required ProjectFile project,
+}) => RustLib.instance.api.crateApiEngineApiSaveProject(
+  path: path,
+  project: project,
+);
+
+/// Read a project from `path`. Returns the DTO; the Dart side then loads each
+/// referenced WAV (best-effort) and pushes parameter setters to bring the
+/// engine into sync. Throws on the Dart side if the file is missing, malformed,
+/// or claims a newer schema than this build supports. Runs off the audio thread.
+Future<ProjectFile> loadProject({required String path}) =>
+    RustLib.instance.api.crateApiEngineApiLoadProject(path: path);
 
 /// The output sample rate (Hz) the engine is running at, or 48000 if it hasn't
 /// started yet. The UI draws the EQ response curve at this rate so it matches

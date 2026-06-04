@@ -1,66 +1,56 @@
-//! [`Strip`] — a channel strip: source → EQ → gain → pan → output, plus a meter.
+//! [`Strip`] — one track in the mixer: WAV source → [`Chain`] (EQ → gain → pan)
+//! → meter, summed into a shared mix bus.
 //!
-//! This is the seed of the eventual audio graph. It owns the realtime source
-//! ([`WavPlayer`]), the in-order DSP units ([`Eq`], then [`Gain`], then [`Pan`]),
-//! the
-//! pre-allocated planar scratch buffers the chain processes in, and the
-//! post-fader peak meter. The audio callback owns one `Strip` and calls
-//! [`Strip::process`] per buffer.
+//! ## What changed in Milestone 4
 //!
-//! ## Why scratch buffers + chunking (Rust/realtime note)
+//! Through Milestone 3 the strip wrote directly to the interleaved device
+//! buffer. With multitrack, that no longer makes sense: every strip's output has
+//! to be *summed* with every other strip's, and only the final master sum gets
+//! interleaved onto the device. So [`Strip::render_into`] now renders into the
+//! caller's planar accumulator and **adds** to it, leaving the device-buffer
+//! interleave to the [`Mixer`](crate::mixer::Mixer).
 //!
-//! cpal hands us an interleaved device buffer of *some* frame count that can
-//! vary between callbacks. Our DSP works on planar buffers, so we need somewhere
-//! to deinterleave into — but we cannot allocate on the audio thread. So the
-//! strip owns two `Vec<f32>` (left/right) sized to [`MAX_BLOCK`] frames, filled
-//! once at construction (before any callback runs) and only ever *sliced* after
-//! that. If a callback's block is larger than `MAX_BLOCK`, we process it in
-//! `MAX_BLOCK`-frame chunks — still zero allocation, correct for any size.
+//! ## Why scratch buffers (Rust/realtime note)
 //!
-//! ## Signal flow each chunk
+//! The DSP units work on planar buffers, so we need somewhere to deinterleave
+//! into — but we cannot allocate on the audio thread. So the strip owns two
+//! `Vec<f32>` (left/right) sized to [`MAX_BLOCK`] frames, filled once at
+//! construction (before any callback runs) and only ever *sliced* after that.
+//! The mixer guarantees `render_into` is only ever handed an accumulator slice
+//! of at most [`MAX_BLOCK`] frames, so the strip never needs a bigger buffer.
+//!
+//! ## Signal flow per block
 //!
 //! 1. [`WavPlayer::render`] fills the planar scratch (`left`, `right`).
-//! 2. [`Eq`], then [`Gain`], then [`Pan`] process the scratch in place
-//!    (per-sample / per-sub-block smoothed).
-//! 3. We interleave the scratch onto the device buffer, and on the way:
-//!    - update the post-fader peak meter (one running peak-hold per channel),
-//!    - tap the post-fader mono mix into the oscilloscope ring.
+//! 2. The [`Chain`] processes the scratch in place (EQ → gain → pan, all
+//!    per-sample smoothed).
+//! 3. We add the scratch into the caller's accumulator, updating the post-fader
+//!    peak meter as we go.
 //!
 //! The meter is **post-fader** (standard): it reflects what you hear after gain
 //! and pan, so muting drops the meter to silence.
 
 use std::sync::Arc;
 
-use rtrb::Producer;
-
 use crate::clip::AudioClip;
 use crate::commands::Command;
-use crate::dsp::{Eq, FilterKind, Gain, Pan, Process};
+use crate::dsp::{Chain, Process};
 
-/// Largest block (in frames) the strip processes in one pass. Device buffers
-/// are almost always well under this (128–2048 typical); anything larger is
-/// split into chunks. Sizing the scratch to this is a few tens of KB — trivial,
-/// and it means the audio thread never needs a bigger buffer than it has.
-const MAX_BLOCK: usize = 4096;
-
-/// Default starting level/pan for a fresh strip: unity gain, centered.
-const INITIAL_GAIN_DB: f32 = 0.0;
-const INITIAL_PAN: f32 = 0.0;
+/// Largest accumulator block (in frames) the strip will ever be asked to add
+/// into. The mixer chunks bigger device buffers into pieces of this size, so the
+/// scratch never has to be bigger.
+pub const MAX_BLOCK: usize = 4096;
 
 /// Meter release time: how fast the displayed peak falls after a transient.
 /// Attack is instantaneous (the meter jumps up immediately on a louder sample);
 /// release is a ~300 ms exponential decay so peaks are readable, not flickery.
 const METER_RELEASE_SECS: f32 = 0.3;
 
-/// A single channel strip: WAV source, EQ, gain, pan, and a post-fader peak
-/// meter.
+/// A single channel strip: WAV source, processing chain, planar scratch, and a
+/// post-fader peak meter.
 pub struct Strip {
     player: WavPlayerSource,
-    /// 4-band parametric EQ, pre-fader (the standard place: shape the tone, then
-    /// set the level).
-    eq: Eq,
-    gain: Gain,
-    pan: Pan,
+    pub(crate) chain: Chain,
     /// Planar scratch, pre-allocated to [`MAX_BLOCK`] and only ever sliced.
     scratch_l: Vec<f32>,
     scratch_r: Vec<f32>,
@@ -81,9 +71,7 @@ impl Strip {
     pub fn new(device_rate: f32) -> Self {
         Self {
             player: WavPlayerSource::new(device_rate),
-            eq: Eq::new(device_rate),
-            gain: Gain::new(device_rate, INITIAL_GAIN_DB),
-            pan: Pan::new(device_rate, INITIAL_PAN),
+            chain: Chain::new(device_rate),
             scratch_l: vec![0.0; MAX_BLOCK],
             scratch_r: vec![0.0; MAX_BLOCK],
             meter_release: (-1.0 / (METER_RELEASE_SECS * device_rate)).exp(),
@@ -92,27 +80,12 @@ impl Strip {
         }
     }
 
-    /// Route one command to the right place: transport to the player, parameter
-    /// changes to the DSP units. Realtime-safe.
+    /// Apply a transport command (Play/Pause/Stop/Seek/SetLooping) to this
+    /// strip's player. Parameter changes are routed by the [`Mixer`] directly to
+    /// the chain, so they never come through here. Realtime-safe.
     #[inline]
-    pub fn handle(&mut self, cmd: Command) {
-        match cmd {
-            Command::Play
-            | Command::Pause
-            | Command::Stop
-            | Command::Seek(_)
-            | Command::SetLooping(_) => self.player.handle(cmd),
-            Command::SetGainDb(db) => self.gain.set_db(db),
-            Command::SetGainLinear(lin) => self.gain.set_linear(lin),
-            Command::SetPan(p) => self.pan.set_pos(p),
-            Command::SetEqBandKind(n, code) => {
-                self.eq.set_band_kind(n as usize, FilterKind::from_code(code))
-            }
-            Command::SetEqBandFreq(n, hz) => self.eq.set_band_freq(n as usize, hz),
-            Command::SetEqBandQ(n, q) => self.eq.set_band_q(n as usize, q),
-            Command::SetEqBandGainDb(n, db) => self.eq.set_band_gain_db(n as usize, db),
-            Command::SetEqBandEnabled(n, on) => self.eq.set_band_enabled(n as usize, on),
-        }
+    pub fn handle_transport(&mut self, cmd: Command) {
+        self.player.handle(cmd);
     }
 
     /// Swap in a new clip, returning the displaced one (undropped — see
@@ -122,13 +95,27 @@ impl Strip {
         self.player.set_clip(clip)
     }
 
+    /// Fully clear this strip — drop the clip (returning it undropped for the
+    /// control thread to dispose of), reset the processing chain to its
+    /// defaults, and zero the meter. Used by [`crate::mixer::Mixer::clear_track`]
+    /// when a track is removed from the project so the strip is fresh if it's
+    /// reused later. Realtime-safe.
+    #[inline]
+    pub fn clear(&mut self) -> Option<Arc<AudioClip>> {
+        let displaced = self.player.clear();
+        self.chain.reset();
+        self.peak_l = 0.0;
+        self.peak_r = 0.0;
+        displaced
+    }
+
     /// Current playhead position in clip frames. Realtime-safe.
     #[inline]
     pub fn pos_frames(&self) -> i64 {
         self.player.pos_frames()
     }
 
-    /// Whether playback is currently advancing. Realtime-safe.
+    /// Whether this strip's player is currently advancing. Realtime-safe.
     #[inline]
     pub fn is_playing(&self) -> bool {
         self.player.is_playing()
@@ -147,75 +134,40 @@ impl Strip {
         self.peak_r
     }
 
-    /// Render the strip into the interleaved device buffer `data` (`channels`
-    /// interleaved samples per frame), tapping the post-fader mono mix into the
-    /// scope ring. Splits oversized buffers into [`MAX_BLOCK`]-frame chunks.
+    /// Render `mix_l.len()` frames of this strip's output and **add** them into
+    /// the caller's planar accumulator. The accumulator slices must be the same
+    /// length and at most [`MAX_BLOCK`] frames — the mixer enforces that with
+    /// its own chunking.
     ///
     /// **THE REALTIME HOT PATH.** Allocation-free, lock-free, panic-free.
     #[inline]
-    pub fn process(&mut self, data: &mut [f32], channels: usize, scope_tx: &mut Producer<f32>) {
-        if channels == 0 {
-            return;
-        }
-        // Walk the device buffer one chunk (≤ MAX_BLOCK frames) at a time.
-        for chunk in data.chunks_mut(MAX_BLOCK * channels) {
-            let frames = chunk.len() / channels;
-            self.process_chunk(chunk, frames, channels, scope_tx);
-        }
-    }
-
-    /// Process exactly `frames` frames (guaranteed ≤ [`MAX_BLOCK`]) into one
-    /// slice of the device buffer.
-    #[inline]
-    fn process_chunk(
-        &mut self,
-        chunk: &mut [f32],
-        frames: usize,
-        channels: usize,
-        scope_tx: &mut Producer<f32>,
-    ) {
+    pub fn render_into(&mut self, mix_l: &mut [f32], mix_r: &mut [f32]) {
+        let frames = mix_l.len().min(mix_r.len());
+        debug_assert!(frames <= MAX_BLOCK, "strip block exceeds MAX_BLOCK");
         let left = &mut self.scratch_l[..frames];
         let right = &mut self.scratch_r[..frames];
 
         // 1. Source -> planar scratch.
         self.player.render(left, right);
 
-        // 2. EQ, then gain, then pan, in place. `block` borrows the two scratch
-        //    slices; the borrow checker guarantees the units can't alias them.
+        // 2. EQ -> gain -> pan, in place. The borrow checker guarantees the
+        //    chain can't alias the scratch slices it processes.
         let mut block: [&mut [f32]; 2] = [left, right];
-        self.eq.process(&mut block);
-        self.gain.process(&mut block);
-        self.pan.process(&mut block);
+        self.chain.process(&mut block);
 
-        // 3. Interleave onto the device buffer, updating the meter and scope as
-        //    we go. Re-borrow the scratch immutably now the DSP is done.
+        // 3. Add the scratch into the caller's accumulator and update the
+        //    post-fader peak meter sample-by-sample. We re-borrow the scratch
+        //    immutably now the chain is done.
         let left = &self.scratch_l[..frames];
         let right = &self.scratch_r[..frames];
-        for (f, frame) in chunk.chunks_mut(channels).enumerate() {
+        for f in 0..frames {
             let l = left[f];
             let r = right[f];
-
-            // Post-fader peak meter: instant attack (jump to a louder sample),
-            // exponential release otherwise.
+            // Instant attack to a louder sample, exponential release otherwise.
             self.peak_l = (self.peak_l * self.meter_release).max(l.abs());
             self.peak_r = (self.peak_r * self.meter_release).max(r.abs());
-
-            // Spread stereo onto the device's channel layout: mono device gets
-            // the downmix; stereo maps 1:1; extra channels get silence.
-            if channels == 1 {
-                frame[0] = (l + r) * 0.5;
-            } else {
-                for (c, out) in frame.iter_mut().enumerate() {
-                    *out = match c {
-                        0 => l,
-                        1 => r,
-                        _ => 0.0,
-                    };
-                }
-            }
-
-            // Post-fader mono mix to the scope (wait-free; full ring just drops).
-            let _ = scope_tx.push((l + r) * 0.5);
+            mix_l[f] += l;
+            mix_r[f] += r;
         }
     }
 }
@@ -223,7 +175,6 @@ impl Strip {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scope::scope_channel;
     use assert_no_alloc::assert_no_alloc;
 
     const SR: f32 = 48_000.0;
@@ -235,14 +186,14 @@ mod tests {
 
     #[test]
     fn meter_responds_to_audio_then_decays() {
-        let (mut scope_tx, _r) = scope_channel();
         let mut strip = Strip::new(SR);
         strip.set_clip(const_clip(0.8, 96_000));
-        strip.handle(Command::Play);
+        strip.handle_transport(Command::Play);
 
         // Render a block of full-ish signal: the meter should read clearly > 0.
-        let mut data = [0.0_f32; 1024]; // 512 stereo frames
-        strip.process(&mut data, 2, &mut scope_tx);
+        let mut mix_l = vec![0.0_f32; 512];
+        let mut mix_r = vec![0.0_f32; 512];
+        strip.render_into(&mut mix_l, &mut mix_r);
         assert!(
             strip.peak_left() > 0.5 && strip.peak_right() > 0.5,
             "meter should rise with audio, got L={} R={}",
@@ -251,9 +202,15 @@ mod tests {
         );
 
         // Stop and render silence for ~2 s; the meter must decay toward zero.
-        strip.handle(Command::Stop);
+        strip.handle_transport(Command::Stop);
         for _ in 0..200 {
-            strip.process(&mut data, 2, &mut scope_tx);
+            for x in mix_l.iter_mut() {
+                *x = 0.0;
+            }
+            for x in mix_r.iter_mut() {
+                *x = 0.0;
+            }
+            strip.render_into(&mut mix_l, &mut mix_r);
         }
         assert!(
             strip.peak_left() < 0.01 && strip.peak_right() < 0.01,
@@ -265,89 +222,88 @@ mod tests {
 
     #[test]
     fn mute_drops_the_meter() {
-        let (mut scope_tx, _r) = scope_channel();
         let mut strip = Strip::new(SR);
         strip.set_clip(const_clip(0.8, 96_000));
-        strip.handle(Command::Play);
-        strip.handle(Command::SetGainDb(-120.0)); // hard mute
+        strip.handle_transport(Command::Play);
+        strip.chain.set_gain_db(-120.0); // hard mute
 
         // The gain smoother mutes the signal within ~10 ms; after that the meter
         // only releases (300 ms time constant). Run ~2 s of audio so the held
         // peak has decayed well below the threshold.
-        let mut data = [0.0_f32; 1024];
+        let mut mix_l = vec![0.0_f32; 512];
+        let mut mix_r = vec![0.0_f32; 512];
         for _ in 0..200 {
-            strip.process(&mut data, 2, &mut scope_tx);
+            for x in mix_l.iter_mut() {
+                *x = 0.0;
+            }
+            for x in mix_r.iter_mut() {
+                *x = 0.0;
+            }
+            strip.render_into(&mut mix_l, &mut mix_r);
         }
         assert!(
             strip.peak_left() < 0.01,
             "muted strip should meter ~0, got {}",
             strip.peak_left()
         );
-        // And the device buffer is actually silent at the tail.
-        assert!(data[data.len() - 1].abs() < 1e-3);
+        // And the strip's added contribution is effectively silence at the tail.
+        assert!(mix_l[mix_l.len() - 1].abs() < 1e-3);
     }
 
     #[test]
-    fn hard_left_pan_silences_right_output() {
-        let (mut scope_tx, _r) = scope_channel();
+    fn hard_left_pan_silences_right_contribution() {
         let mut strip = Strip::new(SR);
         strip.set_clip(const_clip(0.8, 96_000));
-        strip.handle(Command::Play);
-        strip.handle(Command::SetPan(-1.0));
+        strip.handle_transport(Command::Play);
+        strip.chain.set_pan(-1.0);
 
-        let mut data = [0.0_f32; 2048];
+        let mut mix_l = vec![0.0_f32; 1024];
+        let mut mix_r = vec![0.0_f32; 1024];
         for _ in 0..50 {
-            strip.process(&mut data, 2, &mut scope_tx);
+            for x in mix_l.iter_mut() {
+                *x = 0.0;
+            }
+            for x in mix_r.iter_mut() {
+                *x = 0.0;
+            }
+            strip.render_into(&mut mix_l, &mut mix_r);
         }
-        // Odd (right) interleaved samples should be ~silent; left ones audible.
-        let last_l = data[data.len() - 2];
-        let last_r = data[data.len() - 1];
+        // Right contribution should be ~silent; left should be audible.
         assert!(
-            last_l.abs() > 0.3,
-            "left should carry the signal, got {last_l}"
+            mix_l[mix_l.len() - 1].abs() > 0.3,
+            "left should carry the signal, got {}",
+            mix_l[mix_l.len() - 1]
         );
         assert!(
-            last_r.abs() < 0.01,
-            "hard-left pan should silence right, got {last_r}"
+            mix_r[mix_r.len() - 1].abs() < 0.01,
+            "hard-left pan should silence right, got {}",
+            mix_r[mix_r.len() - 1]
         );
     }
 
     #[test]
-    fn handles_blocks_larger_than_max_block_in_chunks() {
-        // A device buffer bigger than MAX_BLOCK must still render fully (chunked)
-        // without panicking or going out of bounds.
-        let (mut scope_tx, _r) = scope_channel();
-        let mut strip = Strip::new(SR);
-        strip.set_clip(const_clip(0.5, MAX_BLOCK * 4));
-        strip.handle(Command::Play);
-
-        let frames = MAX_BLOCK + 777; // not a multiple of MAX_BLOCK
-        let mut data = vec![0.0_f32; frames * 2];
-        strip.process(&mut data, 2, &mut scope_tx);
-        assert!(
-            data.iter().any(|&s| s != 0.0),
-            "oversized block should render"
-        );
-        assert_eq!(strip.pos_frames(), frames as i64);
-    }
-
-    #[test]
-    fn strip_process_does_not_allocate() {
-        // The full strip path — command routing, planar render, gain, pan, meter,
-        // interleave, scope tap — under assert_no_alloc, with parameter changes
-        // and a clip swap, as the real callback exercises it.
-        let (mut scope_tx, _r) = scope_channel();
+    fn strip_render_does_not_allocate() {
+        // The full strip path — transport, planar render, chain, meter, sum into
+        // the accumulator — under assert_no_alloc, with parameter changes and a
+        // clip swap, as the mixer exercises it each callback.
         let mut strip = Strip::new(SR);
         let clip = const_clip(0.7, 50_000);
-        let mut data = [0.0_f32; 1024];
+        let mut mix_l = vec![0.0_f32; 512];
+        let mut mix_r = vec![0.0_f32; 512];
 
         assert_no_alloc(|| {
             strip.set_clip(clip); // move in; no alloc (Option::replace)
-            strip.handle(Command::Play);
+            strip.handle_transport(Command::Play);
             for i in 0..1000 {
-                strip.handle(Command::SetGainDb(-(i % 24) as f32));
-                strip.handle(Command::SetPan(((i % 200) as f32 / 100.0) - 1.0));
-                strip.process(&mut data, 2, &mut scope_tx);
+                strip.chain.set_gain_db(-(i % 24) as f32);
+                strip.chain.set_pan(((i % 200) as f32 / 100.0) - 1.0);
+                for x in mix_l.iter_mut() {
+                    *x = 0.0;
+                }
+                for x in mix_r.iter_mut() {
+                    *x = 0.0;
+                }
+                strip.render_into(&mut mix_l, &mut mix_r);
             }
         });
     }

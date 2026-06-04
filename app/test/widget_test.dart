@@ -84,10 +84,45 @@ void main() {
   group('HomePage', () {
     // A HomePage wired to a fake engine and a stub file picker that returns a
     // fixed path, so no native dialog is ever shown.
-    Widget homePage(FakeEngine engine, {String? path = '/tmp/test.wav'}) =>
+    Widget homePage(
+      FakeEngine engine, {
+      String? path = '/tmp/test.wav',
+      String? saveProjectPath = '/tmp/proj.json',
+      String? openProjectPath = '/tmp/proj.json',
+    }) =>
         MaterialApp(
-          home: HomePage(engine: engine, pickWavPath: () async => path),
+          home: HomePage(
+            engine: engine,
+            pickWavPath: () async => path,
+            pickProjectSavePath: () async => saveProjectPath,
+            pickProjectOpenPath: () async => openProjectPath,
+          ),
         );
+
+    /// Tap the "+" tile [n] times so the home page has `n` tracks. The mixer
+    /// for the existing M4-style flows assumes tracks exist; the M5 default is
+    /// an empty project.
+    Future<void> addTracks(WidgetTester tester, int n) async {
+      for (var i = 0; i < n; i++) {
+        final add = find.byTooltip('Add track');
+        await tester.ensureVisible(add);
+        await tester.tap(add);
+        await tester.pumpAndSettle();
+      }
+    }
+
+    /// Pump a HomePage and pre-populate it with [tracks] tracks. The default
+    /// matches the M4 baseline (two tracks) so existing test bodies need only
+    /// switch their setup helper.
+    Future<void> pumpHome(
+      WidgetTester tester,
+      FakeEngine engine, {
+      String? path = '/tmp/test.wav',
+      int tracks = 2,
+    }) async {
+      await tester.pumpWidget(homePage(engine, path: path));
+      await addTracks(tester, tracks);
+    }
 
     /// Tap the n-th "Open WAV…" button (0 = Track 1, 1 = Track 2).
     Future<void> openTrack(WidgetTester tester, int n) async {
@@ -97,34 +132,150 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('starts with two empty track rows and a master strip', (
+    testWidgets('starts with no tracks, only the master strip', (
       tester,
     ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
       await tester.pumpWidget(homePage(engine));
 
-      // One Open button per visible track.
-      expect(find.text('Open WAV…'), findsNWidgets(kVisibleTracks));
-      expect(find.text('No file loaded'), findsNWidgets(kVisibleTracks));
-
-      // Mixer row: two track strips + one master strip = three ChannelStrips,
-      // visible from the start (you can mix silence too).
-      expect(find.byType(ChannelStrip), findsNWidgets(kVisibleTracks + 1));
-      expect(find.text('Track 1'), findsWidgets); // strip header
-      expect(find.text('Track 2'), findsWidgets);
+      // No Open buttons yet — tracks come from the "+" tile.
+      expect(find.text('Open WAV…'), findsNothing);
+      // Only the master strip is in the row by default.
+      expect(find.byType(ChannelStrip), findsOneWidget);
       expect(find.text('Master'), findsOneWidget);
-
-      // No clip yet, so the waveform isn't shown.
-      expect(find.byType(WaveformView), findsNothing);
+      // The Add tile is present and enabled.
+      expect(find.byTooltip('Add track'), findsOneWidget);
+      // Empty-state hint is visible.
+      expect(find.textContaining('No tracks yet'), findsOneWidget);
     });
+
+    testWidgets('Add tile creates a track with its own strip and row', (
+      tester,
+    ) async {
+      final engine = FakeEngine();
+      addTearDown(engine.dispose);
+      await tester.pumpWidget(homePage(engine));
+      await addTracks(tester, 1);
+
+      expect(find.text('Open WAV…'), findsOneWidget);
+      expect(find.text('No file loaded'), findsOneWidget);
+      // Mixer row: one track + master.
+      expect(find.byType(ChannelStrip), findsNWidgets(2));
+      expect(find.text('Track 1'), findsWidgets);
+    });
+
+    testWidgets(
+      'remove button drops the track and asks the engine to clear it',
+      (tester) async {
+        final engine = FakeEngine();
+        addTearDown(engine.dispose);
+        await pumpHome(tester, engine);
+        // Two tracks now. The first close button removes Track 1 (engine slot 0).
+        final close = find.byTooltip('Remove track').first;
+        await tester.ensureVisible(close);
+        await tester.tap(close);
+        await tester.pumpAndSettle();
+
+        expect(engine.clearedTracks, [0]);
+        // One track remains; total strips = 1 + master.
+        expect(find.byType(ChannelStrip), findsNWidgets(2));
+      },
+    );
+
+    testWidgets(
+      'saving emits a Project with one Track per UI track',
+      (tester) async {
+        final engine = FakeEngine();
+        addTearDown(engine.dispose);
+        await pumpHome(tester, engine);
+        // Open a WAV into Track 1 so its clipPath ends up in the snapshot.
+        await openTrack(tester, 0);
+
+        await tester.tap(find.byTooltip('Save project…'));
+        await tester.pumpAndSettle();
+
+        expect(engine.savedProjects, hasLength(1));
+        final saved = engine.savedProjects.single;
+        expect(saved.path, '/tmp/proj.json');
+        expect(saved.project.tracks, hasLength(2));
+        expect(saved.project.tracks[0].clipPath, '/tmp/test.wav');
+        expect(saved.project.tracks[0].name, 'Track 1');
+        expect(saved.project.tracks[1].clipPath, isNull);
+      },
+    );
+
+    testWidgets(
+      'loading applies the project: tracks, params, and clip loads',
+      (tester) async {
+        final engine = FakeEngine()
+          ..loadProjectResult = const Project(
+            name: 'Demo',
+            tracks: [
+              Track(
+                name: 'Kick',
+                clipPath: '/tmp/kick.wav',
+                gainDb: -6,
+                pan: -0.25,
+              ),
+              Track(name: 'Bass', clipPath: null, gainDb: 0, pan: 0.5),
+            ],
+            master: MasterBus(gainDb: -3, pan: 0),
+          );
+        addTearDown(engine.dispose);
+        await tester.pumpWidget(homePage(engine));
+
+        await tester.tap(find.byTooltip('Open project…'));
+        await tester.pumpAndSettle();
+
+        // Two tracks in the row (plus master).
+        expect(find.byType(ChannelStrip), findsNWidgets(3));
+        expect(find.text('Kick'), findsWidgets);
+        expect(find.text('Bass'), findsWidgets);
+
+        // Only Track 1 had a clip path → exactly one loadWav was attempted.
+        expect(engine.loadedClips, hasLength(1));
+        expect(engine.loadedClips.single.path, '/tmp/kick.wav');
+        expect(engine.loadedClips.single.track, 0);
+
+        // Parameters got pushed to the engine (one per track from _applyProject).
+        expect(engine.trackGainLinears, hasLength(2));
+        expect(engine.trackPans, hasLength(2));
+        expect(engine.masterGainLinears, hasLength(1));
+
+        // Project name appears in the AppBar title.
+        expect(find.textContaining('Demo'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'a missing referenced WAV marks just that track, not the whole project',
+      (tester) async {
+        final engine = FakeEngine()
+          ..loadError = 'file not found'
+          ..loadProjectResult = const Project(
+            tracks: [Track(name: 'Track 1', clipPath: '/tmp/gone.wav')],
+            master: MasterBus(),
+          );
+        addTearDown(engine.dispose);
+        await tester.pumpWidget(homePage(engine));
+
+        await tester.tap(find.byTooltip('Open project…'));
+        await tester.pumpAndSettle();
+
+        // The track exists in the UI…
+        expect(find.byType(ChannelStrip), findsNWidgets(2)); // track + master
+        // …and the open-WAV row flags it as missing.
+        expect(find.textContaining('(missing)'), findsOneWidget);
+      },
+    );
 
     testWidgets('opening a WAV into Track 1 loads it for track 0', (
       tester,
     ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
 
       await openTrack(tester, 0);
 
@@ -141,7 +292,7 @@ void main() {
     testWidgets('opening Track 2 targets track index 1', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
 
       await openTrack(tester, 1);
 
@@ -151,7 +302,7 @@ void main() {
     testWidgets('a cancelled pick loads nothing', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine, path: null));
+      await pumpHome(tester, engine, path: null);
 
       await openTrack(tester, 0);
 
@@ -164,7 +315,7 @@ void main() {
     ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
 
       await openTrack(tester, 0);
 
@@ -183,7 +334,7 @@ void main() {
     testWidgets('Stop stops the engine', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
 
       await openTrack(tester, 0);
       await tester.ensureVisible(find.text('Stop'));
@@ -198,7 +349,7 @@ void main() {
     ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
 
       await openTrack(tester, 0);
 
@@ -214,7 +365,7 @@ void main() {
     testWidgets('scrubbing the waveform seeks the engine', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
 
       await openTrack(tester, 0);
 
@@ -228,11 +379,11 @@ void main() {
     testWidgets('a load error surfaces as a snackbar', (tester) async {
       final engine = FakeEngine()..loadError = 'not a wav';
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
 
+      await tester.ensureVisible(find.text('Open WAV…').first);
       await tester.tap(find.text('Open WAV…').first);
-      await tester.pump(); // run the load future
-      await tester.pump(); // build the snackbar
+      await tester.pumpAndSettle();
 
       expect(find.textContaining('not a wav'), findsOneWidget);
       expect(find.byType(WaveformView), findsNothing);
@@ -243,7 +394,7 @@ void main() {
       (tester) async {
         final engine = FakeEngine();
         addTearDown(engine.dispose);
-        await tester.pumpWidget(homePage(engine));
+        await pumpHome(tester, engine);
         await openTrack(tester, 0);
 
         // 12 Slider widgets in the mixer row (3 strips × 4 sliders each, the
@@ -278,7 +429,7 @@ void main() {
       (tester) async {
         final engine = FakeEngine();
         addTearDown(engine.dispose);
-        await tester.pumpWidget(homePage(engine));
+        await pumpHome(tester, engine);
         await openTrack(tester, 0);
 
         // Master is the third strip in the row; its active gain fader is the
@@ -296,7 +447,7 @@ void main() {
     testWidgets('selecting Track 2 retargets the EQ panel', (tester) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
       await openTrack(tester, 0);
       await openTrack(tester, 1);
 
@@ -321,7 +472,7 @@ void main() {
     ) async {
       final engine = FakeEngine();
       addTearDown(engine.dispose);
-      await tester.pumpWidget(homePage(engine));
+      await pumpHome(tester, engine);
       await openTrack(tester, 0);
 
       await tester.ensureVisible(find.byTooltip('Loop'));

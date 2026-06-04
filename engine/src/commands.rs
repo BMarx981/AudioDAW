@@ -1,14 +1,21 @@
 //! Control → audio messaging.
 //!
-//! The UI thread (where Dart calls land) must never touch the oscillator
-//! directly, because the audio callback owns it on another thread. Sharing it
-//! behind an `Arc<Mutex<_>>` is forbidden here: locking a mutex on the audio
-//! thread can block on a deadline-critical thread and cause dropouts.
+//! The UI thread (where Dart calls land) must never touch the audio graph
+//! directly, because the callback owns it on another thread. Sharing it behind
+//! an `Arc<Mutex<_>>` is forbidden here: locking a mutex on the audio thread can
+//! block on a deadline-critical thread and cause dropouts.
 //!
 //! Instead we pass small POD commands across a lock-free single-producer /
 //! single-consumer ring buffer (`rtrb`). The producer lives on the control
 //! side; the consumer is moved into the audio callback. Push and pop are
 //! wait-free — no mutex, no allocation — so popping is safe on the audio thread.
+//!
+//! ## Multitrack (Milestone 4)
+//!
+//! Every parameter command now carries a `u8` track index so the mixer can
+//! route it to the right strip. The transport commands (`Play`, `Pause`, etc.)
+//! stay global — a single playhead drives every track, so they apply to all of
+//! them at once. The master bus has its own small set of commands.
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -27,42 +34,53 @@ use rtrb::{Consumer, Producer, RingBuffer};
 /// so this enum stays tiny and `Copy`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
-    /// Begin (or resume) playback from the current position.
+    // Transport — applied to every track in parallel so the mixer has one
+    // unified playhead.
+    /// Begin (or resume) playback from the current position on every track.
     Play,
-    /// Pause playback, holding the current position.
+    /// Pause playback on every track, holding the current position.
     Pause,
-    /// Stop playback and rewind to the start.
+    /// Stop playback on every track and rewind to the start.
     Stop,
-    /// Jump the playhead to this position, in seconds from the clip start.
-    /// Clamped to the clip bounds by the player.
+    /// Jump every track's playhead to this position, in seconds from its clip
+    /// start. Clamped to the clip bounds by each player.
     Seek(f32),
-    /// Turn looping on/off. When on, the player wraps back to the start at the
-    /// clip end instead of stopping.
+    /// Turn looping on/off on every track. When on, each player wraps back to
+    /// its start at its clip end instead of stopping.
     SetLooping(bool),
-    /// Set the channel-strip gain target, in decibels. Clamped and smoothed by
-    /// the [`crate::dsp::Gain`] unit.
-    SetGainDb(f32),
-    /// Set the channel-strip gain target as a raw linear multiplier. Clamped and
-    /// smoothed by the [`crate::dsp::Gain`] unit. (Used by the linear gain fader.)
-    SetGainLinear(f32),
-    /// Set the channel-strip pan target, in `[-1, 1]` (−1 = left, +1 = right).
-    /// Clamped and smoothed by the [`crate::dsp::Pan`] unit.
-    SetPan(f32),
-    /// Set EQ band `n`'s filter kind, by integer code (see
-    /// [`crate::dsp::FilterKind::from_code`]). Carried as a `u8` rather than the
-    /// `FilterKind` enum so this command type — reachable from the bridge crate
-    /// via the engine's command ring — names no `dsp` type. That keeps
-    /// flutter_rust_bridge from following the reference into the DSP module and
-    /// tripping over its array-bearing structs (`Biquad`, `Eq`).
-    SetEqBandKind(u8, u8),
-    /// Set EQ band `n`'s center/corner frequency, Hz. Smoothed by the EQ.
-    SetEqBandFreq(u8, f32),
-    /// Set EQ band `n`'s Q (bandwidth). Smoothed by the EQ.
-    SetEqBandQ(u8, f32),
-    /// Set EQ band `n`'s gain, dB (peak/shelf kinds). Smoothed by the EQ.
-    SetEqBandGainDb(u8, f32),
-    /// Enable/disable EQ band `n` (true bypass when off).
-    SetEqBandEnabled(u8, bool),
+
+    // Per-track parameters. The leading `u8` is the track index into the
+    // mixer's strip pool; an out-of-range index is silently ignored by the
+    // mixer (the audio thread never panics).
+    /// Drop the clip on track `t` and reset its strip to defaults (the slot
+    /// stays in the pool for reuse). The audio callback intercepts this one
+    /// specially so the displaced clip can be shipped to the retirement ring
+    /// — the strip itself never frees memory. See `audio.rs::audio_callback`.
+    ClearTrack(u8),
+    /// Set track `t`'s gain target, in decibels.
+    SetTrackGainDb(u8, f32),
+    /// Set track `t`'s gain target as a raw linear multiplier.
+    SetTrackGainLinear(u8, f32),
+    /// Set track `t`'s pan target, in `[-1, 1]`.
+    SetTrackPan(u8, f32),
+    /// Set track `t`'s EQ band `b` filter kind, by integer code.
+    SetTrackEqBandKind(u8, u8, u8),
+    /// Set track `t`'s EQ band `b` center/corner frequency, Hz.
+    SetTrackEqBandFreq(u8, u8, f32),
+    /// Set track `t`'s EQ band `b` Q.
+    SetTrackEqBandQ(u8, u8, f32),
+    /// Set track `t`'s EQ band `b` gain, dB.
+    SetTrackEqBandGainDb(u8, u8, f32),
+    /// Enable/disable track `t`'s EQ band `b`.
+    SetTrackEqBandEnabled(u8, u8, bool),
+
+    // Master bus parameters.
+    /// Set the master bus gain target, in decibels.
+    SetMasterGainDb(f32),
+    /// Set the master bus gain target as a raw linear multiplier.
+    SetMasterGainLinear(f32),
+    /// Set the master bus pan target, in `[-1, 1]`.
+    SetMasterPan(f32),
 }
 
 /// Number of in-flight commands the ring can hold. Far more than the UI can
@@ -90,12 +108,13 @@ mod tests {
         const N: usize = 200; // < CAPACITY, so nothing is dropped
 
         // A distinct command per index so we can assert exact ordering on the far
-        // side; the cycle covers every variant including the payload-carrying one.
-        let make = |i: usize| match i % 4 {
+        // side; the cycle covers transport, per-track, and master variants.
+        let make = |i: usize| match i % 5 {
             0 => Command::Play,
             1 => Command::Pause,
             2 => Command::Stop,
-            _ => Command::Seek(i as f32),
+            3 => Command::SetTrackGainDb((i % 8) as u8, i as f32 * -0.5),
+            _ => Command::SetMasterPan(((i % 200) as f32 / 100.0) - 1.0),
         };
 
         let producer = std::thread::spawn(move || {

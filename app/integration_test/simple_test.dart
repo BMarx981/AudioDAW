@@ -38,8 +38,12 @@ void main() {
 
     expect(engine.isRunning, isFalse);
 
-    // Open the file: decodes in Rust and starts the audio device. Two "Open
-    // WAV…" buttons exist (one per track row); load into Track 1 (the first).
+    // M5 starts empty: add a track via the "+" tile so we have an Open WAV row.
+    await tester.tap(find.byTooltip('Add track'));
+    await tester.pumpAndSettle();
+
+    // Open the file: decodes in Rust and starts the audio device.
+    await tester.ensureVisible(find.text('Open WAV…').first);
     await tester.tap(find.text('Open WAV…').first);
     await tester.pumpAndSettle();
     expect(

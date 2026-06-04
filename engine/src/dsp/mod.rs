@@ -36,12 +36,14 @@
 //! fade instead of a staircase. See [`smooth`].
 
 mod biquad;
+mod chain;
 mod eq;
 mod gain;
 mod pan;
 mod smooth;
 
 pub use biquad::FilterKind;
+pub use chain::Chain;
 pub use eq::Eq;
 pub use gain::Gain;
 pub use pan::Pan;

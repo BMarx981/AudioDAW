@@ -19,16 +19,19 @@
 //! ## Crossing the realtime boundary
 //!
 //! Three lock-free channels span the boundary, all `rtrb` SPSC rings:
-//!   - **commands** (control → audio): small POD transport commands.
-//!   - **clip hand-off** (control → audio): a freshly-decoded `Arc<AudioClip>`.
+//!   - **commands** (control → audio): small POD transport and parameter
+//!     commands, including the track index the command applies to.
+//!   - **clip hand-off** (control → audio): a freshly-decoded `Arc<AudioClip>`
+//!     plus the track index it should land in (see [`TrackedClip`]).
 //!   - **clip retirement** (audio → control): clips the audio thread has
 //!     displaced, sent back so the *control* thread does the deallocation.
 //!
 //! Plus a handful of atomics the audio thread writes and the UI reads: the
 //! playhead position (in frames), whether playback is live, and the post-fader
-//! peak level per channel. Writing an atomic is wait-free, so it's safe in the
-//! callback. `f32` has no atomic type, so the meter levels travel as their raw
-//! bits in an `AtomicU32` (`f32::to_bits` / `from_bits`).
+//! peak level for *every strip* plus the master bus. Writing an atomic is
+//! wait-free, so it's safe in the callback. `f32` has no atomic type, so the
+//! meter levels travel as their raw bits in an `AtomicU32` (`f32::to_bits` /
+//! `from_bits`).
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc;
@@ -41,9 +44,9 @@ use rtrb::{Consumer, Producer};
 
 use crate::clip::AudioClip;
 use crate::commands::{command_channel, Command};
-use crate::player::{clip_channel, retire_channel};
+use crate::mixer::{Mixer, MAX_TRACKS};
+use crate::player::{clip_channel, retire_channel, TrackedClip};
 use crate::scope::{scope_channel, ScopeReader};
-use crate::strip::Strip;
 
 /// A handle to a running audio engine, owned by the control thread.
 ///
@@ -53,9 +56,9 @@ pub struct Engine {
     /// Producer half of the control→audio command ring. `Send`, not `Sync`; only
     /// ever touched from the control thread.
     commands: Producer<Command>,
-    /// Producer half of the clip hand-off ring. We push a decoded clip here; the
-    /// audio callback pops and swaps it in.
-    clips: Producer<Arc<AudioClip>>,
+    /// Producer half of the clip hand-off ring. We push a decoded clip + its
+    /// target track here; the audio callback pops and swaps it in.
+    clips: Producer<TrackedClip>,
     /// Consumer half of the retirement ring. The audio thread pushes clips it has
     /// displaced; we drain (and thereby drop) them here, off the audio thread.
     retired: Consumer<Arc<AudioClip>>,
@@ -63,13 +66,18 @@ pub struct Engine {
     /// convert the playhead frame count into seconds for the UI.
     device_rate: f32,
     /// Current playhead position in clip frames, published by the audio thread.
+    /// Transport is global in Milestone 4, so this is the same for every track.
     playhead: Arc<AtomicI64>,
-    /// Whether playback is currently advancing, published by the audio thread.
+    /// Whether any track is currently advancing, published by the audio thread.
     playing: Arc<AtomicBool>,
-    /// Post-fader peak level per channel, as `f32` bits. Published by the audio
-    /// thread each buffer, read by the meter pump on the control side.
-    peak_l: Arc<AtomicU32>,
-    peak_r: Arc<AtomicU32>,
+    /// Per-track post-fader peak L/R, as `f32` bits. One pair per strip in the
+    /// mixer's pool — the meter pump reads these and ships a per-track snapshot
+    /// to the UI.
+    track_peaks_l: Arc<[AtomicU32; MAX_TRACKS]>,
+    track_peaks_r: Arc<[AtomicU32; MAX_TRACKS]>,
+    /// Post-master-fader peak L/R, as `f32` bits.
+    master_peak_l: Arc<AtomicU32>,
+    master_peak_r: Arc<AtomicU32>,
     /// Signals the audio thread to tear down the stream and exit.
     stop: Arc<AtomicBool>,
     /// Joined on drop. `Option` so `Drop` can `take` it.
@@ -77,6 +85,13 @@ pub struct Engine {
     /// UI-side consumer of the oscilloscope tap. Drained from the control thread
     /// (never the audio thread) by [`Engine::scope_frame`].
     scope: ScopeReader,
+}
+
+/// Build a fresh array of `MAX_TRACKS` zero-initialized atomic `u32`s. We can't
+/// use `[AtomicU32::new(0); N]` because `AtomicU32` is not `Copy`, so build the
+/// array element-wise.
+fn fresh_track_atomics() -> [AtomicU32; MAX_TRACKS] {
+    std::array::from_fn(|_| AtomicU32::new(0))
 }
 
 impl Engine {
@@ -90,8 +105,10 @@ impl Engine {
         let (scope_tx, scope_rx) = scope_channel();
         let playhead = Arc::new(AtomicI64::new(0));
         let playing = Arc::new(AtomicBool::new(false));
-        let peak_l = Arc::new(AtomicU32::new(0));
-        let peak_r = Arc::new(AtomicU32::new(0));
+        let track_peaks_l = Arc::new(fresh_track_atomics());
+        let track_peaks_r = Arc::new(fresh_track_atomics());
+        let master_peak_l = Arc::new(AtomicU32::new(0));
+        let master_peak_r = Arc::new(AtomicU32::new(0));
         let stop = Arc::new(AtomicBool::new(false));
 
         // One-shot channel: the audio thread reports the device sample rate (or
@@ -102,8 +119,10 @@ impl Engine {
         let stop_for_thread = stop.clone();
         let playhead_for_thread = playhead.clone();
         let playing_for_thread = playing.clone();
-        let peak_l_for_thread = peak_l.clone();
-        let peak_r_for_thread = peak_r.clone();
+        let track_peaks_l_for_thread = track_peaks_l.clone();
+        let track_peaks_r_for_thread = track_peaks_r.clone();
+        let master_peak_l_for_thread = master_peak_l.clone();
+        let master_peak_r_for_thread = master_peak_r.clone();
         let thread = std::thread::Builder::new()
             .name("daw-audio".into())
             .spawn(move || {
@@ -114,8 +133,10 @@ impl Engine {
                     scope_tx,
                     playhead_for_thread,
                     playing_for_thread,
-                    peak_l_for_thread,
-                    peak_r_for_thread,
+                    track_peaks_l_for_thread,
+                    track_peaks_r_for_thread,
+                    master_peak_l_for_thread,
+                    master_peak_r_for_thread,
                     stop_for_thread,
                     ready_tx,
                 )
@@ -130,8 +151,10 @@ impl Engine {
                 device_rate,
                 playhead,
                 playing,
-                peak_l,
-                peak_r,
+                track_peaks_l,
+                track_peaks_r,
+                master_peak_l,
+                master_peak_r,
                 stop,
                 thread: Some(thread),
                 scope: scope_rx,
@@ -144,86 +167,114 @@ impl Engine {
         }
     }
 
-    /// Hand a freshly-decoded clip to the audio thread. Fire-and-forget: pushes
-    /// the `Arc` onto the hand-off ring and returns. We first reclaim any retired
-    /// clips so their memory is freed here, on the control thread.
-    pub fn load_clip(&mut self, clip: Arc<AudioClip>) {
+    /// Hand a freshly-decoded clip to the audio thread for `track`. Fire-and-
+    /// forget: pushes the clip + track index onto the hand-off ring and returns.
+    /// We first reclaim any retired clips so their memory is freed here, on the
+    /// control thread. Loading a clip stops the (global) transport so the new
+    /// file doesn't blast out mid-playback.
+    pub fn load_clip(&mut self, track: u8, clip: Arc<AudioClip>) {
         self.collect_garbage();
-        // Moving the Arc into the ring is a pointer copy — no refcount change. If
-        // the ring is somehow full (many loads between two audio buffers), the
-        // push fails and we simply drop this clip here, which is safe and means
-        // the load is a no-op the user can retry.
-        let _ = self.commands.push(Command::Stop); // rewind any current playback
-        let _ = self.clips.push(clip);
+        let _ = self.commands.push(Command::Stop); // rewind every track
+        let _ = self.clips.push(TrackedClip { track, clip });
     }
 
-    /// Begin/resume playback. Fire-and-forget.
+    /// Ask the audio thread to drop the clip on `track` and reset its strip to
+    /// defaults. Fire-and-forget: the displaced clip rides the retirement ring
+    /// back here, where the next `collect_garbage` (or our drain on the next
+    /// load/drop) frees it. Realtime-safe.
+    pub fn clear_track(&mut self, track: u8) {
+        self.collect_garbage();
+        let _ = self.commands.push(Command::ClearTrack(track));
+    }
+
+    /// Begin/resume playback on every track. Fire-and-forget.
     pub fn play(&mut self) {
         let _ = self.commands.push(Command::Play);
     }
 
-    /// Pause, holding position. Fire-and-forget.
+    /// Pause, holding position, on every track. Fire-and-forget.
     pub fn pause(&mut self) {
         let _ = self.commands.push(Command::Pause);
     }
 
-    /// Stop and rewind to the start. Fire-and-forget.
+    /// Stop and rewind every track. Fire-and-forget.
     pub fn stop_playback(&mut self) {
         let _ = self.commands.push(Command::Stop);
     }
 
-    /// Seek to `secs` from the clip start. Fire-and-forget.
+    /// Seek every track to `secs` from its clip start. Fire-and-forget.
     pub fn seek(&mut self, secs: f32) {
         let _ = self.commands.push(Command::Seek(secs));
     }
 
-    /// Turn looping on/off. Fire-and-forget.
+    /// Turn looping on/off on every track. Fire-and-forget.
     pub fn set_looping(&mut self, on: bool) {
         let _ = self.commands.push(Command::SetLooping(on));
     }
 
-    /// Set the strip gain target, in dB. Fire-and-forget; the value is clamped
-    /// and smoothed on the audio thread.
-    pub fn set_gain_db(&mut self, db: f32) {
-        let _ = self.commands.push(Command::SetGainDb(db));
+    /// Set track `t`'s gain, in dB. Fire-and-forget; clamped + smoothed on audio.
+    pub fn set_track_gain_db(&mut self, track: u8, db: f32) {
+        let _ = self.commands.push(Command::SetTrackGainDb(track, db));
     }
 
-    /// Set the strip gain target as a raw linear multiplier. Fire-and-forget.
-    pub fn set_gain_linear(&mut self, linear: f32) {
-        let _ = self.commands.push(Command::SetGainLinear(linear));
+    /// Set track `t`'s gain as a raw linear multiplier. Fire-and-forget.
+    pub fn set_track_gain_linear(&mut self, track: u8, linear: f32) {
+        let _ = self.commands.push(Command::SetTrackGainLinear(track, linear));
     }
 
-    /// Set the strip pan target, in `[-1, 1]`. Fire-and-forget.
-    pub fn set_pan(&mut self, pan: f32) {
-        let _ = self.commands.push(Command::SetPan(pan));
+    /// Set track `t`'s pan, in `[-1, 1]`. Fire-and-forget.
+    pub fn set_track_pan(&mut self, track: u8, pan: f32) {
+        let _ = self.commands.push(Command::SetTrackPan(track, pan));
     }
 
-    /// Set EQ band `n`'s filter kind, by integer code (see
-    /// [`crate::dsp::FilterKind::from_code`]). Forwarded as a `u8` over the
-    /// command ring (which therefore carries no `dsp` type); the strip maps it to
-    /// a `FilterKind`. Fire-and-forget.
-    pub fn set_eq_band_kind(&mut self, n: u8, code: u32) {
-        let _ = self.commands.push(Command::SetEqBandKind(n, code as u8));
+    /// Set track `t`'s EQ band `b` filter kind. Fire-and-forget.
+    pub fn set_track_eq_band_kind(&mut self, track: u8, band: u8, code: u32) {
+        let _ = self
+            .commands
+            .push(Command::SetTrackEqBandKind(track, band, code as u8));
     }
 
-    /// Set EQ band `n`'s frequency, Hz. Fire-and-forget; smoothed on the audio thread.
-    pub fn set_eq_band_freq(&mut self, n: u8, hz: f32) {
-        let _ = self.commands.push(Command::SetEqBandFreq(n, hz));
+    /// Set track `t`'s EQ band `b` frequency, Hz. Fire-and-forget; smoothed.
+    pub fn set_track_eq_band_freq(&mut self, track: u8, band: u8, hz: f32) {
+        let _ = self
+            .commands
+            .push(Command::SetTrackEqBandFreq(track, band, hz));
     }
 
-    /// Set EQ band `n`'s Q. Fire-and-forget; smoothed on the audio thread.
-    pub fn set_eq_band_q(&mut self, n: u8, q: f32) {
-        let _ = self.commands.push(Command::SetEqBandQ(n, q));
+    /// Set track `t`'s EQ band `b` Q. Fire-and-forget; smoothed.
+    pub fn set_track_eq_band_q(&mut self, track: u8, band: u8, q: f32) {
+        let _ = self
+            .commands
+            .push(Command::SetTrackEqBandQ(track, band, q));
     }
 
-    /// Set EQ band `n`'s gain, dB. Fire-and-forget; smoothed on the audio thread.
-    pub fn set_eq_band_gain_db(&mut self, n: u8, db: f32) {
-        let _ = self.commands.push(Command::SetEqBandGainDb(n, db));
+    /// Set track `t`'s EQ band `b` gain, dB. Fire-and-forget; smoothed.
+    pub fn set_track_eq_band_gain_db(&mut self, track: u8, band: u8, db: f32) {
+        let _ = self
+            .commands
+            .push(Command::SetTrackEqBandGainDb(track, band, db));
     }
 
-    /// Enable/disable EQ band `n`. Fire-and-forget.
-    pub fn set_eq_band_enabled(&mut self, n: u8, on: bool) {
-        let _ = self.commands.push(Command::SetEqBandEnabled(n, on));
+    /// Enable/disable track `t`'s EQ band `b`. Fire-and-forget.
+    pub fn set_track_eq_band_enabled(&mut self, track: u8, band: u8, on: bool) {
+        let _ = self
+            .commands
+            .push(Command::SetTrackEqBandEnabled(track, band, on));
+    }
+
+    /// Set the master bus gain in dB. Fire-and-forget.
+    pub fn set_master_gain_db(&mut self, db: f32) {
+        let _ = self.commands.push(Command::SetMasterGainDb(db));
+    }
+
+    /// Set the master bus gain as a raw linear multiplier. Fire-and-forget.
+    pub fn set_master_gain_linear(&mut self, linear: f32) {
+        let _ = self.commands.push(Command::SetMasterGainLinear(linear));
+    }
+
+    /// Set the master bus pan in `[-1, 1]`. Fire-and-forget.
+    pub fn set_master_pan(&mut self, pan: f32) {
+        let _ = self.commands.push(Command::SetMasterPan(pan));
     }
 
     /// The output device sample rate (Hz) the engine is running at. The UI needs
@@ -233,12 +284,23 @@ impl Engine {
         self.device_rate
     }
 
-    /// Latest post-fader peak levels `(left, right)`, linear (0..≈1, can exceed
-    /// 1 if boosted), as published by the audio thread.
-    pub fn peak_levels(&self) -> (f32, f32) {
+    /// Latest post-fader peak for one track, `(left, right)`. `track >= MAX_TRACKS`
+    /// returns silence.
+    pub fn track_peak_levels(&self, track: usize) -> (f32, f32) {
+        if track >= MAX_TRACKS {
+            return (0.0, 0.0);
+        }
         (
-            f32::from_bits(self.peak_l.load(Ordering::Relaxed)),
-            f32::from_bits(self.peak_r.load(Ordering::Relaxed)),
+            f32::from_bits(self.track_peaks_l[track].load(Ordering::Relaxed)),
+            f32::from_bits(self.track_peaks_r[track].load(Ordering::Relaxed)),
+        )
+    }
+
+    /// Latest master-bus peak `(left, right)`, linear.
+    pub fn master_peak_levels(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.master_peak_l.load(Ordering::Relaxed)),
+            f32::from_bits(self.master_peak_r.load(Ordering::Relaxed)),
         )
     }
 
@@ -252,7 +314,7 @@ impl Engine {
         frames as f64 / self.device_rate as f64
     }
 
-    /// Whether playback is currently advancing.
+    /// Whether playback is currently advancing on any track.
     pub fn is_playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed)
     }
@@ -293,18 +355,29 @@ impl Drop for Engine {
 #[allow(clippy::too_many_arguments)]
 fn run_audio_thread(
     command_rx: Consumer<Command>,
-    clip_rx: Consumer<Arc<AudioClip>>,
+    clip_rx: Consumer<TrackedClip>,
     retire_tx: Producer<Arc<AudioClip>>,
     scope_tx: Producer<f32>,
     playhead: Arc<AtomicI64>,
     playing: Arc<AtomicBool>,
-    peak_l: Arc<AtomicU32>,
-    peak_r: Arc<AtomicU32>,
+    track_peaks_l: Arc<[AtomicU32; MAX_TRACKS]>,
+    track_peaks_r: Arc<[AtomicU32; MAX_TRACKS]>,
+    master_peak_l: Arc<AtomicU32>,
+    master_peak_r: Arc<AtomicU32>,
     stop: Arc<AtomicBool>,
     ready_tx: mpsc::Sender<Result<f32, String>>,
 ) {
     let (stream, device_rate) = match build_stream(
-        command_rx, clip_rx, retire_tx, scope_tx, playhead, playing, peak_l, peak_r,
+        command_rx,
+        clip_rx,
+        retire_tx,
+        scope_tx,
+        playhead,
+        playing,
+        track_peaks_l,
+        track_peaks_r,
+        master_peak_l,
+        master_peak_r,
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -327,19 +400,21 @@ fn run_audio_thread(
 }
 
 /// Open the default output device and build the f32 stream. All per-stream state
-/// (the player) is allocated here, *before* the callback ever runs, then moved
-/// into the callback closure. Nothing is allocated inside the callback itself.
-/// Returns the stream and the device sample rate.
+/// (the mixer + its strip pool) is allocated here, *before* the callback ever
+/// runs, then moved into the callback closure. Nothing is allocated inside the
+/// callback itself. Returns the stream and the device sample rate.
 #[allow(clippy::too_many_arguments)]
 fn build_stream(
     command_rx: Consumer<Command>,
-    clip_rx: Consumer<Arc<AudioClip>>,
+    clip_rx: Consumer<TrackedClip>,
     retire_tx: Producer<Arc<AudioClip>>,
     scope_tx: Producer<f32>,
     playhead: Arc<AtomicI64>,
     playing: Arc<AtomicBool>,
-    peak_l: Arc<AtomicU32>,
-    peak_r: Arc<AtomicU32>,
+    track_peaks_l: Arc<[AtomicU32; MAX_TRACKS]>,
+    track_peaks_r: Arc<[AtomicU32; MAX_TRACKS]>,
+    master_peak_l: Arc<AtomicU32>,
+    master_peak_r: Arc<AtomicU32>,
 ) -> Result<(cpal::Stream, f32), String> {
     let host = cpal::default_host();
     let device = host
@@ -355,10 +430,11 @@ fn build_stream(
     let channels = config.channels() as usize;
     let sample_format = config.sample_format();
 
-    // Pre-allocate the strip now, on the spawning thread (this is where its
-    // scratch buffers are allocated — never inside the callback). It is moved
-    // into the callback below and never reallocated.
-    let mut strip = Strip::new(sample_rate);
+    // Pre-allocate the mixer (and its strip pool) now, on the spawning thread.
+    // This is where every per-strip scratch buffer and the master accumulator
+    // are allocated — never inside the callback. Moved into the callback below
+    // and never reallocated.
+    let mut mixer = Mixer::new(sample_rate);
     let mut command_rx = command_rx;
     let mut clip_rx = clip_rx;
     let mut retire_tx = retire_tx;
@@ -379,15 +455,17 @@ fn build_stream(
                     audio_callback(
                         data,
                         channels,
-                        &mut strip,
+                        &mut mixer,
                         &mut command_rx,
                         &mut clip_rx,
                         &mut retire_tx,
                         &mut scope_tx,
                         &playhead,
                         &playing,
-                        &peak_l,
-                        &peak_r,
+                        &track_peaks_l,
+                        &track_peaks_r,
+                        &master_peak_l,
+                        &master_peak_r,
                     );
                 },
                 err_fn,
@@ -405,33 +483,49 @@ fn build_stream(
 ///   - draining the rings with `pop()` is wait-free and never allocates
 ///   - swapping a clip is a move; the displaced clip is pushed to the retirement
 ///     ring (also wait-free) rather than dropped here
-///   - `Strip::process` only does stack arithmetic + a wait-free scope push
+///   - `Mixer::process` only does stack arithmetic + a wait-free scope push
 ///   - publishing the playhead/playing/peak state is a wait-free atomic store
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn audio_callback(
     data: &mut [f32],
     channels: usize,
-    strip: &mut Strip,
+    mixer: &mut Mixer,
     command_rx: &mut Consumer<Command>,
-    clip_rx: &mut Consumer<Arc<AudioClip>>,
+    clip_rx: &mut Consumer<TrackedClip>,
     retire_tx: &mut Producer<Arc<AudioClip>>,
     scope_tx: &mut Producer<f32>,
     playhead: &AtomicI64,
     playing: &AtomicBool,
-    peak_l: &AtomicU32,
-    peak_r: &AtomicU32,
+    track_peaks_l: &[AtomicU32; MAX_TRACKS],
+    track_peaks_r: &[AtomicU32; MAX_TRACKS],
+    master_peak_l: &AtomicU32,
+    master_peak_r: &AtomicU32,
 ) {
-    // 1. Apply any pending commands, in order (transport + gain/pan).
+    // 1. Apply any pending commands, in order. The mixer routes most of them to
+    //    the right strip; `ClearTrack` is special-cased because it produces a
+    //    displaced clip that must be shipped to the retirement ring (the mixer
+    //    has no handle on that ring).
     while let Ok(cmd) = command_rx.pop() {
-        strip.handle(cmd);
+        if let Command::ClearTrack(t) = cmd {
+            if let Some(old) = mixer.clear_track(t) {
+                if let Err(rtrb::PushError::Full(old)) = retire_tx.push(old) {
+                    // Pathological: control thread hasn't drained in a long time.
+                    // Leaking is realtime-safe (no deallocation); dropping here
+                    // would not be. Matched ring capacities make this never fire.
+                    std::mem::forget(old);
+                }
+            }
+        } else {
+            mixer.handle(cmd);
+        }
     }
 
-    // 2. Swap in any newly-loaded clip. The clip we displace must NOT be dropped
+    // 2. Swap in any newly-loaded clips. The clip we displace must NOT be dropped
     //    here (that would free memory on the audio thread); ship it back through
     //    the retirement ring for the control thread to drop.
-    while let Ok(clip) = clip_rx.pop() {
-        if let Some(old) = strip.set_clip(clip) {
+    while let Ok(t) = clip_rx.pop() {
+        if let Some(old) = mixer.set_clip(t.track, t.clip) {
             if let Err(rtrb::PushError::Full(old)) = retire_tx.push(old) {
                 // Pathological: the control thread hasn't drained in a long time.
                 // Leaking is realtime-safe (no deallocation); dropping here would
@@ -441,15 +535,20 @@ fn audio_callback(
         }
     }
 
-    // 3. Render the strip (source → gain → pan → output) and tap the scope.
-    strip.process(data, channels, scope_tx);
+    // 3. Render the mix (each strip into the master accumulator → master chain
+    //    → device buffer) and tap the scope.
+    mixer.process(data, channels, scope_tx);
 
     // 4. Publish playhead + transport + meter state for the UI. Wait-free atomic
     //    stores; the meter levels travel as `f32` bits.
-    playhead.store(strip.pos_frames(), Ordering::Relaxed);
-    playing.store(strip.is_playing(), Ordering::Relaxed);
-    peak_l.store(strip.peak_left().to_bits(), Ordering::Relaxed);
-    peak_r.store(strip.peak_right().to_bits(), Ordering::Relaxed);
+    playhead.store(mixer.pos_frames(), Ordering::Relaxed);
+    playing.store(mixer.is_playing(), Ordering::Relaxed);
+    for t in 0..MAX_TRACKS {
+        track_peaks_l[t].store(mixer.track_peak_left(t).to_bits(), Ordering::Relaxed);
+        track_peaks_r[t].store(mixer.track_peak_right(t).to_bits(), Ordering::Relaxed);
+    }
+    master_peak_l.store(mixer.master_peak_left().to_bits(), Ordering::Relaxed);
+    master_peak_r.store(mixer.master_peak_right().to_bits(), Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -460,8 +559,8 @@ mod tests {
 
     #[test]
     fn callback_does_not_allocate() {
-        // Exercise the exact callback path (drain commands + clip ring + render +
-        // publish) under assert_no_alloc. No real audio device is opened.
+        // Exercise the exact callback path (drain commands + clip ring + render
+        // + publish) under assert_no_alloc. No real audio device is opened.
         let (mut cmd_tx, cmd_rx) = command_channel();
         let mut command_rx = cmd_rx;
         let (mut clip_tx, mut clip_rx) = clip_channel();
@@ -469,9 +568,11 @@ mod tests {
         let (mut scope_tx, _scope_rx) = scope_channel();
         let playhead = AtomicI64::new(0);
         let playing = AtomicBool::new(false);
-        let peak_l = AtomicU32::new(0);
-        let peak_r = AtomicU32::new(0);
-        let mut strip = Strip::new(48_000.0);
+        let track_peaks_l = fresh_track_atomics();
+        let track_peaks_r = fresh_track_atomics();
+        let master_peak_l = AtomicU32::new(0);
+        let master_peak_r = AtomicU32::new(0);
+        let mut mixer = Mixer::new(48_000.0);
         let mut buf = [0.0_f32; 512];
         let channels = 2;
 
@@ -479,30 +580,33 @@ mod tests {
         let clip = Arc::new(
             AudioClip::new(44_100.0, vec![vec![0.1; 20_000], vec![-0.1; 20_000]]).unwrap(),
         );
-        let _ = clip_tx.push(clip);
+        let _ = clip_tx.push(TrackedClip { track: 0, clip });
 
         for i in 0..1000 {
             // Push commands from the "control" side, outside the guard — cover
-            // transport *and* the new gain/pan parameter commands.
-            let _ = cmd_tx.push(match i % 4 {
+            // transport, per-track parameter, and master parameter variants.
+            let _ = cmd_tx.push(match i % 5 {
                 0 => Command::Play,
                 1 => Command::Seek((i % 10) as f32 * 0.01),
-                2 => Command::SetGainDb(-(i % 24) as f32),
-                _ => Command::SetPan(((i % 200) as f32 / 100.0) - 1.0),
+                2 => Command::SetTrackGainDb(0, -(i % 24) as f32),
+                3 => Command::SetTrackPan(1, ((i % 200) as f32 / 100.0) - 1.0),
+                _ => Command::SetMasterGainDb(-(i % 12) as f32),
             });
             assert_no_alloc(|| {
                 audio_callback(
                     &mut buf,
                     channels,
-                    &mut strip,
+                    &mut mixer,
                     &mut command_rx,
                     &mut clip_rx,
                     &mut retire_tx,
                     &mut scope_tx,
                     &playhead,
                     &playing,
-                    &peak_l,
-                    &peak_r,
+                    &track_peaks_l,
+                    &track_peaks_r,
+                    &master_peak_l,
+                    &master_peak_r,
                 );
             });
         }

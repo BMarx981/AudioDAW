@@ -21,7 +21,9 @@ mod clip;
 mod commands;
 mod decode;
 mod dsp;
+mod mixer;
 mod player;
+mod project;
 mod scope;
 mod strip;
 

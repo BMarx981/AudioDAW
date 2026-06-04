@@ -81,6 +81,18 @@ impl WavPlayer {
         self.clip.replace(clip)
     }
 
+    /// Drop the current clip (without freeing it — handed back for the control
+    /// thread to dispose of, same contract as [`Self::set_clip`]), reset
+    /// position/playing/looping, and return to a freshly-constructed state.
+    /// Used by [`crate::strip::Strip::clear`] when a track is removed.
+    #[inline]
+    pub fn clear(&mut self) -> Option<Arc<AudioClip>> {
+        self.pos = 0.0;
+        self.playing = false;
+        self.looping = false;
+        self.clip.take()
+    }
+
     /// Apply one transport command. Realtime-safe.
     #[inline]
     pub fn handle(&mut self, cmd: Command) {
@@ -110,16 +122,21 @@ impl WavPlayer {
                 }
             }
             Command::SetLooping(on) => self.looping = on,
-            // Gain/pan/EQ commands are not the player's concern; the owning strip
-            // routes those to the DSP units. Ignored here.
-            Command::SetGainDb(_)
-            | Command::SetGainLinear(_)
-            | Command::SetPan(_)
-            | Command::SetEqBandKind(_, _)
-            | Command::SetEqBandFreq(_, _)
-            | Command::SetEqBandQ(_, _)
-            | Command::SetEqBandGainDb(_, _)
-            | Command::SetEqBandEnabled(_, _) => {}
+            // Gain/pan/EQ commands (per-track or master), plus `ClearTrack`,
+            // are not the player's concern; the mixer (or, for `ClearTrack`,
+            // the audio callback) routes them. Ignored here.
+            Command::ClearTrack(_)
+            | Command::SetTrackGainDb(..)
+            | Command::SetTrackGainLinear(..)
+            | Command::SetTrackPan(..)
+            | Command::SetTrackEqBandKind(..)
+            | Command::SetTrackEqBandFreq(..)
+            | Command::SetTrackEqBandQ(..)
+            | Command::SetTrackEqBandGainDb(..)
+            | Command::SetTrackEqBandEnabled(..)
+            | Command::SetMasterGainDb(_)
+            | Command::SetMasterGainLinear(_)
+            | Command::SetMasterPan(_) => {}
         }
     }
 
@@ -218,17 +235,28 @@ impl WavPlayer {
 /// Capacity of the clip hand-off and retirement rings, in clips. Loading is a
 /// rare, human-driven action, so a handful of slots is plenty; the control
 /// thread drains the retirement ring far faster than clips can pile up.
-const CLIP_RING_CAPACITY: usize = 8;
+const CLIP_RING_CAPACITY: usize = 16;
+
+/// A clip plus the track it is destined for. Crosses the control→audio boundary
+/// through the hand-off ring; the audio callback uses `track` to pick which
+/// strip's player gets the clip. Cheap to move (`u8` + `Arc`); the heavy
+/// `AudioClip` itself lives behind the `Arc` and is not copied.
+pub struct TrackedClip {
+    pub track: u8,
+    pub clip: Arc<AudioClip>,
+}
 
 /// Create the control→audio clip hand-off ring. The control thread pushes a
-/// freshly-decoded `Arc<AudioClip>`; the audio callback pops it and swaps it in.
-pub fn clip_channel() -> (Producer<Arc<AudioClip>>, Consumer<Arc<AudioClip>>) {
+/// freshly-decoded clip + its target track; the audio callback pops it and
+/// swaps the clip into the addressed strip.
+pub fn clip_channel() -> (Producer<TrackedClip>, Consumer<TrackedClip>) {
     RingBuffer::new(CLIP_RING_CAPACITY)
 }
 
 /// Create the audio→control retirement ring. The audio callback pushes clips it
 /// has displaced (so it never drops them); the control thread drains and drops
-/// them, which is where the actual deallocation safely happens.
+/// them, which is where the actual deallocation safely happens. Track index is
+/// not retained here — drop order doesn't depend on it.
 pub fn retire_channel() -> (Producer<Arc<AudioClip>>, Consumer<Arc<AudioClip>>) {
     RingBuffer::new(CLIP_RING_CAPACITY)
 }
@@ -402,11 +430,11 @@ mod tests {
             for i in 0..1000 {
                 if i % 250 == 0 {
                     if let Some(c) = clip_iter.next() {
-                        let _ = clip_tx.push(c);
+                        let _ = clip_tx.push(TrackedClip { track: 0, clip: c });
                     }
                 }
-                while let Ok(c) = clip_rx.pop() {
-                    if let Some(old) = player.set_clip(c) {
+                while let Ok(t) = clip_rx.pop() {
+                    if let Some(old) = player.set_clip(t.clip) {
                         if let Err(rtrb::PushError::Full(old)) = retire_tx.push(old) {
                             std::mem::forget(old);
                         }

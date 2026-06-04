@@ -4,19 +4,32 @@ import 'dart:typed_data';
 ///
 /// Per TESTING.md the UI never talks to the Rust bridge directly — it depends on
 /// this interface and on the plain value types below ([ClipInfo],
-/// [PlaybackState]), never on generated bridge classes. Production wires in
-/// [RustEngine]; widget tests wire in a `FakeEngine` that returns scripted data.
+/// [PlaybackState], [Project] …), never on generated bridge classes. Production
+/// wires in [RustEngine]; widget tests wire in a `FakeEngine` that returns
+/// scripted data.
 ///
 /// ## Multitrack (Milestone 4)
 ///
-/// Parameter setters now take a `track` index, and there are matching `master*`
-/// setters for the master bus. Transport (`play`/`pause`/`stop`/`seek`) is
-/// global — one playhead advances every track. The meter stream is a single
-/// [MixerMeters] event per tick carrying the per-track peaks and the master
-/// bus peak together, so the UI drives all the meters from one subscription.
+/// Parameter setters take a `track` index; matching `master*` setters drive
+/// the master bus. Transport (`play`/`pause`/`stop`/`seek`) is global — one
+/// playhead advances every track. The meter stream is a single [MixerMeters]
+/// event per tick carrying the per-track peaks and the master bus peak together,
+/// so the UI drives all the meters from one subscription.
+///
+/// ## Project model (Milestone 5)
+///
+/// The UI owns the canonical per-track state (slider positions, EQ bands…); on
+/// Save it pours that into a [Project] DTO and calls [saveProject], which
+/// writes JSON. On Load, [loadProject] returns the same DTO and the UI then
+/// drives the engine setters (and `loadWav` calls) to bring the audio side
+/// into sync. Removing a track in the UI calls [clearTrack] to drop that
+/// strip's clip + reset its parameters, freeing the engine pool slot for
+/// reuse. `loadWav` failures stay on the throwing-Future contract, so a load
+/// that references a missing WAV surfaces per-track without aborting the
+/// whole project — the UI catches the error and marks just that track empty.
 abstract class EngineInterface {
   /// The track-pool capacity exposed by the engine. UI state arrays are sized
-  /// to this; only the first two slots are user-visible in Milestone 4.
+  /// to this; up to this many tracks can exist at once in a project.
   int get maxTracks;
 
   /// Decode a WAV at [path], hand it to [track] in the engine (starting the
@@ -75,6 +88,19 @@ abstract class EngineInterface {
 
   /// Set the master bus pan in [-1, 1]. Fire-and-forget.
   void setMasterPan(double pan);
+
+  /// Drop [track]'s clip and reset its strip to defaults. The pool slot stays
+  /// available for reuse. Fire-and-forget.
+  void clearTrack(int track);
+
+  /// Write [project] to [path] as JSON. Throws if the file can't be written.
+  Future<void> saveProject(String path, Project project);
+
+  /// Read a project from [path]. Throws if the file is missing, malformed, or
+  /// from a newer schema than this build supports. The caller is responsible
+  /// for then calling [loadWav] for each track's clipPath and pushing the
+  /// per-track parameter setters to bring the engine into sync.
+  Future<Project> loadProject(String path);
 
   /// The engine's output sample rate (Hz). The EQ response curve is drawn at
   /// this rate so it matches what the audio thread actually filters with.
@@ -210,3 +236,164 @@ class MixerMeters {
     masterPeakR: 0,
   );
 }
+
+/// One EQ band's settings, as the UI holds them (the UI-rate values). The
+/// engine keeps its own smoothed audio-rate copy; this is the source of truth
+/// for the controls and the drawn response curve. Lives in the engine seam
+/// (not the UI layer) because it's also the per-band shape inside a [Track].
+class EqBand {
+  const EqBand({
+    required this.kind,
+    required this.freqHz,
+    required this.q,
+    required this.gainDb,
+    required this.enabled,
+  });
+
+  final EqFilterKind kind;
+  final double freqHz;
+  final double q;
+  final double gainDb;
+  final bool enabled;
+
+  EqBand copyWith({
+    EqFilterKind? kind,
+    double? freqHz,
+    double? q,
+    double? gainDb,
+    bool? enabled,
+  }) => EqBand(
+    kind: kind ?? this.kind,
+    freqHz: freqHz ?? this.freqHz,
+    q: q ?? this.q,
+    gainDb: gainDb ?? this.gainDb,
+    enabled: enabled ?? this.enabled,
+  );
+}
+
+/// The default 4-band layout — must match the engine's `Eq::new` defaults so
+/// the UI and audio agree from the first frame: low-shelf, two bells,
+/// high-shelf, all flat (0 dB).
+const List<EqBand> kDefaultEqBands = [
+  EqBand(
+    kind: EqFilterKind.lowShelf,
+    freqHz: 120,
+    q: 0.707,
+    gainDb: 0,
+    enabled: true,
+  ),
+  EqBand(
+    kind: EqFilterKind.peak,
+    freqHz: 500,
+    q: 1.0,
+    gainDb: 0,
+    enabled: true,
+  ),
+  EqBand(
+    kind: EqFilterKind.peak,
+    freqHz: 3000,
+    q: 1.0,
+    gainDb: 0,
+    enabled: true,
+  ),
+  EqBand(
+    kind: EqFilterKind.highShelf,
+    freqHz: 8000,
+    q: 0.707,
+    gainDb: 0,
+    enabled: true,
+  ),
+];
+
+/// One track's persistent state — what gets written to the project file.
+/// Mirrors the Rust `TrackState` (in `engine/src/project.rs`) but uses plain
+/// Dart types (e.g. [EqFilterKind] instead of an int code) so the UI never
+/// has to think about wire encoding.
+class Track {
+  const Track({
+    required this.name,
+    this.clipPath,
+    this.gainDb = 0.0,
+    this.pan = 0.0,
+    this.eqBands = kDefaultEqBands,
+  });
+
+  /// User-facing label. Auto-filled to `"Track N"` on creation; preserved
+  /// across save/load so a renamed track keeps its name.
+  final String name;
+
+  /// Last WAV the track was loaded with, or null for an empty track. Surviving
+  /// a save → load with the file moved or deleted is the missing-file case the
+  /// UI surfaces on the affected row without aborting the whole project.
+  final String? clipPath;
+
+  final double gainDb;
+  final double pan;
+  final List<EqBand> eqBands;
+
+  Track copyWith({
+    String? name,
+    Object? clipPath = _unset,
+    double? gainDb,
+    double? pan,
+    List<EqBand>? eqBands,
+  }) => Track(
+    name: name ?? this.name,
+    // copyWith of a nullable field needs a sentinel so callers can clear it
+    // (clipPath: null) without it being mistaken for "unchanged".
+    clipPath: identical(clipPath, _unset) ? this.clipPath : clipPath as String?,
+    gainDb: gainDb ?? this.gainDb,
+    pan: pan ?? this.pan,
+    eqBands: eqBands ?? this.eqBands,
+  );
+}
+
+/// Master bus state. Same shape as a [Track] minus identity and clip path;
+/// kept separate so the UI can render it without a "this is the master" flag.
+class MasterBus {
+  const MasterBus({
+    this.gainDb = 0.0,
+    this.pan = 0.0,
+    this.eqBands = kDefaultEqBands,
+  });
+
+  final double gainDb;
+  final double pan;
+  final List<EqBand> eqBands;
+
+  MasterBus copyWith({
+    double? gainDb,
+    double? pan,
+    List<EqBand>? eqBands,
+  }) => MasterBus(
+    gainDb: gainDb ?? this.gainDb,
+    pan: pan ?? this.pan,
+    eqBands: eqBands ?? this.eqBands,
+  );
+}
+
+/// A whole project as the UI holds it and as it lives on disk. `tracks` may
+/// have any length up to [EngineInterface.maxTracks]; an empty project is
+/// valid (no tracks, default master).
+class Project {
+  const Project({
+    this.name = 'Untitled',
+    this.tracks = const [],
+    this.master = const MasterBus(),
+  });
+
+  final String name;
+  final List<Track> tracks;
+  final MasterBus master;
+
+  Project copyWith({String? name, List<Track>? tracks, MasterBus? master}) =>
+      Project(
+        name: name ?? this.name,
+        tracks: tracks ?? this.tracks,
+        master: master ?? this.master,
+      );
+}
+
+/// Sentinel object used by copyWith methods to distinguish "set to null" from
+/// "don't change". Private to this file.
+const Object _unset = Object();
